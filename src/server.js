@@ -58,10 +58,22 @@ export function renderPython() {
   return pythonBin;
 }
 
-function renderScreenPng(language = 'zh', port = 8787) {
+// 三页：1 现状看板 / 2 慢信息 / 3 闲读。云端 Pages 只有页 1，
+// 页 2、3 走局域网，PC 关机时显示该页最后一次的缓存。
+export const PAGE_COUNT = 3;
+
+export function parsePage(raw) {
+  const n = Number.parseInt(raw ?? '1', 10);
+  return Number.isInteger(n) && n >= 1 && n <= PAGE_COUNT ? n : 1;
+}
+
+function renderScreenPng(language = 'zh', port = 8787, page = 1, pages = 1) {
   return new Promise((resolve, reject) => {
     const script = path.join(import.meta.dirname, '..', 'tools', 'render_screen.py');
-    const child = spawn(renderPython(), [script, '--lang', language, '--url', 'http://127.0.0.1:' + port + '/api/dashboard'], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 90000 });
+    const child = spawn(renderPython(), [script, '--lang', language,
+      '--page', String(page), '--pages', String(pages),
+      '--url', 'http://127.0.0.1:' + port + '/api/dashboard'],
+    { stdio: ['ignore', 'pipe', 'pipe'], timeout: 90000 });
     const chunks = [];
     const errs = [];
     child.stdout.on('data', d => chunks.push(d));
@@ -80,12 +92,12 @@ function renderScreenPng(language = 'zh', port = 8787) {
 // 所有请求共享同一个结果。
 function createRenderOnce(renderImage) {
   const renders = new Map();
-  return (language, port) => {
-    const key = language + ':' + port;
+  return (language, port, page, pages) => {
+    const key = language + ':' + port + ':p' + page + ':n' + pages;
     const pending = renders.get(key);
     if (pending) return pending;
     const p = Promise.resolve()
-      .then(() => renderImage(language, port))
+      .then(() => renderImage(language, port, page, pages))
       .finally(() => { if (renders.get(key) === p) renders.delete(key); });
     renders.set(key, p);
     return p;
@@ -374,18 +386,28 @@ export function createServer({ db = null, cfg = config, renderImage = renderScre
     if (url.pathname === '/api/display') {
       try {
         const language = url.searchParams.get('lang') === 'en' ? 'en' : 'zh';
-        const png = await renderOnce(language, req.socket.localPort);
+        // 设备上的旧插件（v0.3.4）不带 page 参数，也看不懂翻页手势。
+        // 只有显式请求分页的客户端才启用三页模式，否则给它一张没有页码的单页图，
+        // 免得显示「1/3 · 左右滑换页」却根本滑不动。
+        const paged = url.searchParams.has('page');
+        const page = parsePage(url.searchParams.get('page'));
+        const pages = paged ? PAGE_COUNT : 1;
+        const png = await renderOnce(language, req.socket.localPort, page, pages);
         const dim = pngDimensions(png);
         if (!dim || dim.width < 100 || dim.height < 100) throw new Error('renderer returned an invalid PNG');
         const sha256 = createHash('sha256').update(png).digest('hex');
         imageCache.set(sha256, png);
-        while (imageCache.size > 8) imageCache.delete(imageCache.keys().next().value);
+        // 三页 × 中英双语 = 6 张，再加上左右滑动时的旧版本，8 条上限会让刚看过的页
+        // 立刻被挤掉（Kindle 拿到清单再取图就会 404）。留出两轮翻页的余量。
+        while (imageCache.size > PAGE_COUNT * 4) imageCache.delete(imageCache.keys().next().value);
         sendJson(res, { schemaVersion: 1, image_url: '/api/image/' + sha256 + '.png', sha256,
           generatedAt: Date.now(), width: dim.width, height: dim.height,
-          state: 'ready', language, staleAfterSeconds: 2700, refreshAfterSeconds: 1800 });
+          state: 'ready', language, page, pages,
+          staleAfterSeconds: 2700, refreshAfterSeconds: 1800 });
         // 出图 = 看板真的在被使用，顺手把本机用量推一份到云端兜底。
+        // 只在页 1 记一次：来回翻页不该变成额外上报（节流本来会挡住，但省掉无谓调用）。
         // fire-and-forget：内部自带节流/退避，失败静默，绝不拖慢这次响应。
-        if (reporter) reporter.maybeReport();
+        if (reporter && page === 1) reporter.maybeReport();
       } catch (e) {
         process.stderr.write('[dash] display render failed: ' + e.message + '\n');
         res.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8', 'X-Content-Type-Options': 'nosniff' });
@@ -395,7 +417,9 @@ export function createServer({ db = null, cfg = config, renderImage = renderScre
     }
     if (url.pathname === '/api/screen') {
       try {
-        const png = await renderOnce(url.searchParams.get('lang') === 'en' ? 'en' : 'zh', req.socket.localPort);
+        const paged = url.searchParams.has('page');
+        const png = await renderOnce(url.searchParams.get('lang') === 'en' ? 'en' : 'zh',
+          req.socket.localPort, parsePage(url.searchParams.get('page')), paged ? PAGE_COUNT : 1);
         if (!pngDimensions(png)) throw new Error('renderer returned an invalid PNG');
         res.writeHead(200, {
           'Content-Type': 'image/png',

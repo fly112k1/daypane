@@ -17,6 +17,7 @@ on:
       - 'tools/build_site.py'
       - 'tools/render_screen.py'
       - 'tools/layout.py'
+      - 'tools/slowinfo.py'
       - 'web/setup/**'
       - 'src/**'
       - 'config.json'

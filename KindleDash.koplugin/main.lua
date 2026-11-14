@@ -8,6 +8,12 @@
 --   2) 云端静态图（GitHub Pages manifest）—— GitHub Actions 每半小时渲染，电脑关机仍可用
 --   3) 本地持久缓存（settings 目录）—— 网络全断时显示最后一次的图
 --
+-- 三页（左右滑 / 点按两侧切换，绝不自动轮播）：
+--   1 现状看板（局域网 + 云端兜底）  2 慢信息（节气/月相/日出日落/未来天气）  3 闲读
+-- 页 2、3 只有局域网 PC 会生成，云端 Pages 只有页 1，所以这两页不挂云图源，
+-- 避免电脑关机时把「看板」误当成「慢信息」显示出来。每页各有一份持久缓存，
+-- 切页时先秒显该页缓存再静默取新图 —— e-ink 上绝不闪白/黑屏。
+--
 -- 自动刷新：看板显示期间默认保持唤醒，UI 定时器在请求完成后安排下一次。
 -- 手动休眠暂停 UI 更新，唤醒后恢复。周期 RTC 默认关闭，仍属机型相关实验。
 -- 不在唤醒边界同步调用 resetT1Timeout。
@@ -40,7 +46,8 @@ local JSON = require("json")
 -- 会连累 OPDS 下载、同步等其它功能的超时策略（见 request() 里的 save/restore）。
 local REQUEST_TIMEOUT = 8
 
-local VERSION = "0.3.4"
+local VERSION = "0.4.0"
+local PAGE_COUNT = 3
 local REFRESH_SEC = 30 * 60
 local MAX_IMAGE = 4 * 1024 * 1024
 local DEFAULT_HOST = ""
@@ -177,11 +184,31 @@ end
 function KindleDash:cacheDir()
     return DataStorage:getSettingsDir()
 end
+
+-- 页码始终从这里读：测试里 Plugin:new{} 不会跑 init()，设备升级后设置里也可能
+-- 残留越界值。统一钳制可避免拼出 kindledash_screen_p99.png 这种孤儿缓存。
+function KindleDash:currentPage()
+    local n = math.floor(tonumber(self.page) or 1)
+    if n < 1 or n > PAGE_COUNT then return 1 end
+    return n
+end
+
+-- 每页一份持久缓存。页 1 沿用历史文件名（升级后旧缓存仍能直接上屏），
+-- 页 2/3 加 _pN 后缀；中英再各自分开，切语言不会串页。
+function KindleDash:cacheStem()
+    local stem = self.language == "en" and "kindledash_screen_en" or CACHE_IMG_NAME:gsub("%.png$", "")
+    local p = self:currentPage()
+    if p > 1 then stem = stem .. "_p" .. p end
+    return stem
+end
 function KindleDash:cacheImg()
-    return self:cacheDir() .. "/" .. (self.language == "en" and "kindledash_screen_en.png" or CACHE_IMG_NAME)
+    return self:cacheDir() .. "/" .. self:cacheStem() .. ".png"
 end
 function KindleDash:cacheTs()
-    return self:cacheDir() .. "/" .. (self.language == "en" and "kindledash_ts_en.txt" or CACHE_TS_NAME)
+    local suffix = self.language == "en" and "_en" or ""
+    local p = self:currentPage()
+    if p > 1 then suffix = suffix .. "_p" .. p end
+    return self:cacheDir() .. "/" .. CACHE_TS_NAME:gsub("%.txt$", "") .. suffix .. ".txt"
 end
 function KindleDash:ensureCacheDir()
     local dir = self:cacheDir()
@@ -195,9 +222,11 @@ function KindleDash:readTs()
     local s = f:read("*a"); f:close()
     return s and s:match("^%s*(.-)%s*$") or nil
 end
-function KindleDash:writeTs(s)
+-- path 可显式传入：刷新途中若被切页抢占，时间戳仍要写回发起那一页，
+-- 不能让第 2 页的取图把第 3 页的"最后更新"改成现在。
+function KindleDash:writeTs(s, path)
     self:ensureCacheDir()
-    local f = io.open(self:cacheTs(), "wb")
+    local f = io.open(path or self:cacheTs(), "wb")
     if not f then return nil end
     f:write(s or ""); f:close()
     return true
@@ -323,6 +352,12 @@ end
 -- 会出现"定时器按 5 分钟算、RTC 按 60 秒算"的错位。
 function KindleDash:intervalSec()
     local interval = tonumber(self:option("interval", REFRESH_SEC)) or REFRESH_SEC
+    -- 页 2 慢信息、页 3 闲读的内容按天变化，没必要每半小时把整屏墨水闪一次。
+    -- 页 1 保持用户配置的节奏：切回页 1 时 gotoPage 会重新按 30 分钟上弦，
+    -- 不会让 WorkBuddy 用量一直停在两小时前。
+    if self:currentPage() > 1 then
+        interval = math.max(interval, 4 * REFRESH_SEC)
+    end
     return math.max(300, math.min(86400, interval))
 end
 
@@ -451,17 +486,21 @@ end
 function KindleDash:endpoints()
     local list = {}
     local lang = self.language == "en" and "en" or "zh"
+    local page = self:currentPage()
     -- 设置对话框里用户手输的内容要洗干净：粘了 "http://" 前缀、尾部斜杠或
     -- 空格时，以前会拼出 "http://http://host//api/screen" 这种永远连不上的 URL。
     local host = tostring(self.host or ""):match("^%s*(.-)%s*$") or ""
     host = host:gsub("^https?://", ""):gsub("/+$", "")
     if host ~= "" and not host:find("%s") then
-        table.insert(list, { url = "http://" .. host .. "/api/screen?lang=" .. lang, name = self:tr("本机") })
+        table.insert(list, { url = "http://" .. host .. "/api/screen?lang=" .. lang .. "&page=" .. page,
+                             name = self:tr("本机") })
     end
+    -- 云端 Pages 只有页 1。页 2/3 挂上去会在电脑关机时显示成"看板"，内容与页码
+    -- 不符，还会在健康日志里留下假的 download_verified。
     local cloud = tostring(self.cloud or ""):match("^%s*(.-)%s*$") or ""
     -- 只允许 http(s)：request() 里虽然也会拦，但别让非法 scheme 混进图源列表
     -- 变成一条"永远失败"的降级分支，污染健康日志。
-    if cloud:match("^https?://%S+$") then
+    if page == 1 and cloud:match("^https?://%S+$") then
         table.insert(list, { url = cloud, name = self:tr("云端") })
     end
     return list
@@ -665,13 +704,24 @@ function KindleDash:buildScreen(img_path, w, h)
         SwipeScroll = { GestureRange:new{ ges = "swipe", range = function() return container.dimen end } },
     }
     function container:onTapScroll(_, ges)
-        -- 顶部 10% 区域点击 = 退出（Kindle 无 Back 键，靠此关闭看板）
-        if ges and ges.pos and ges.pos.y < h * 0.1 then self:onClose() end
+        if not (ges and ges.pos) then return true end
+        -- 顶部 10% 区域点击 = 退出（Kindle 无 Back 键，靠此关闭看板）。
+        -- 退出优先于翻页，顶部整条都是安全区，不会被误判成左右翻页。
+        if ges.pos.y < h * 0.1 then self:onClose(); return true end
+        -- 两侧各 22% 点按换页；中间 56% 留给内容，避免"想看仔细点"就跳页。
+        if ges.pos.x < w * 0.22 then dash:gotoPage(dash:currentPage() - 1)
+        elseif ges.pos.x > w * 0.78 then dash:gotoPage(dash:currentPage() + 1) end
         return true
     end
     function container:onSwipeScroll(_, ges)
+        if not ges then return true end
         -- 顶部 25% 下滑 = 退出
-        if ges and ges.pos and ges.direction == "south" and ges.pos.y < h * 0.25 then self:onClose() end
+        if ges.direction == "south" and ges.pos and ges.pos.y < h * 0.25 then
+            self:onClose(); return true
+        end
+        -- 左滑(west)下一页、右滑(east)上一页，和 KOReader 翻页方向一致。
+        if ges.direction == "west" then dash:gotoPage(dash:currentPage() + 1)
+        elseif ges.direction == "east" then dash:gotoPage(dash:currentPage() - 1) end
         return true
     end
     -- 关闭逻辑只有一份：Kindle 无返回键，退出入口是顶部点按/下滑 (onClose)
@@ -715,7 +765,10 @@ function KindleDash:showDashboard(path, offline)
     -- 离线时每 30 分钟都会走一次"用旧缓存顶上"。图片字节没变还去重建
     -- ImageWidget 会触发一次全屏 e-ink 刷新并白白解码 4MB 以内的 PNG。
     -- 只有文件真的换了（writePng 会清掉 _shown_path）才重新上屏。
-    if self.dash_widget and self._shown_path == path and self._shown_offline == offline then
+    -- 只按"路径"短路：每页缓存文件名不同，切页必然重建 widget。
+    -- 以前还比较 offline 标记，导致切页后先按缓存上屏、紧接着刷新失败又用
+    -- 同一张图重建一次（e-ink 上就是一次多余的全屏闪）。
+    if self.dash_widget and self._shown_path == path then
         return true
     end
     local previous = self.dash_widget
@@ -738,6 +791,37 @@ function KindleDash:showDashboard(path, offline)
     return true
 end
 
+-- ---------------- 分页 ----------------
+
+-- 左右滑 / 点按两侧换页。刻意不做自动轮播：这块屏是"想看才翻"的，
+-- 自己跳页会把放松用的副屏变成又一个催促源。
+function KindleDash:gotoPage(target)
+    local n = math.floor(tonumber(target) or 1)
+    -- 首尾相接：三页来回翻不用记方向，也不会撞到"滑不动"的死胡同。
+    if n < 1 then n = PAGE_COUNT end
+    if n > PAGE_COUNT then n = 1 end
+    if n == self:currentPage() then return false end
+
+    -- 作废进行中的刷新：那一轮拿到的是旧页的图，不能盖掉刚切过去的新页。
+    self._generation = (self._generation or 0) + 1
+    self._busy = false
+    self:releaseNetwork()
+
+    self.page = n
+    self:setOption("page", n)   -- 重启 KOReader 后停在用户上次看的那页
+    self:record("page", "page=" .. n)
+
+    local path = self:cacheImg()
+    if self.dash_widget and self:fileExists(path) then
+        -- 先秒显该页最后一次的图（e-ink 双稳态），再静默取新图；
+        -- 没有缓存时什么都不做，继续显示当前页，绝不闪白/黑屏。
+        self:showDashboard(path, false)
+    end
+    -- 取图失败会由 refreshDashboard 保住刚显示的缓存。
+    self:requestRefresh(true, true)
+    return true
+end
+
 local function fmtTime(t)
     return t and os.date("%Y-%m-%d %H:%M:%S", t) or "—"
 end
@@ -749,6 +833,7 @@ function KindleDash:showStatus()
         .. self:label("Screen: ", "屏幕：") .. Screen:getWidth() .. " × " .. Screen:getHeight() .. "\n"
         .. self:label("RTC wake: ", "RTC 唤醒：") .. (Device.wakeup_mgr and self:label("available", "可用") or self:label("unavailable", "不可用")) .. "\n"
         .. self:label("Hold awake: ", "常亮：") .. (self._holding and self:tr("开") or self:tr("关")) .. "\n"
+        .. self:label("Page: ", "当前页：") .. self:currentPage() .. " / " .. PAGE_COUNT .. "\n"
         .. self:label("Source: ", "图源：") .. tostring(self._source or m.source or "—") .. "\n"
         .. self:label("Content generated: ", "内容生成：") .. fmtTime(m.generatedAt and m.generatedAt / 1000) .. "\n"
         .. self:label("Cloud state: ", "云端状态：") .. tostring(m.state or "Unknown / 未知") .. "\n"
@@ -832,12 +917,18 @@ end
 
 function KindleDash:refreshDashboard(silent, manual)
     if self._suspended then return false end
+    -- 一次刷新只服务一个页：把这些路径与页码在开头固定住，切页抢占后仍需
+    -- 把结果写回发起页的缓存，但绝不能把那一页的图显示到新页上。
+    local page = self:currentPage()
+    local cacheImg = self:cacheImg()
+    local tsPath = self:cacheTs()
     local data, err, source, unchanged = self:fetchScreen()
     self._fetch_error = err
-    local cacheImg = self:cacheImg()
     local showing = (self.dash_widget ~= nil)   -- 看板此刻是否正显示在屏幕上
 
     if not data then
+        -- 被切页抢占时连离线兜底都不要做：那会把旧页的缓存推到新页上。
+        if page ~= self:currentPage() then return false end
         -- 拉取失败：看板正显示时（或用户主动打开时）用持久缓存顶上
         if self:fileExists(cacheImg) then
             self._offline = true
@@ -865,10 +956,13 @@ function KindleDash:refreshDashboard(silent, manual)
         logger.warn("ShawnKanban cache write failed")
         return false
     end
-    self:writeTs(os.date("%Y-%m-%d %H:%M"))
+    self:writeTs(os.date("%Y-%m-%d %H:%M"), tsPath)
     self._offline = false
     self._last_ok = true
     self._source = source
+
+    -- 被切页抢占：缓存已经写好，但这一屏现在属于另一页，直接收手。
+    if page ~= self:currentPage() then return true end
 
     -- 后台刷新且看板没在显示：只默默更新缓存，别把看板弹回来（下次打开即是最新）
     if not showing and not manual then
@@ -1052,6 +1146,8 @@ function KindleDash:init()
     self.auto_on = self:option("auto_refresh", true)
     self.host = self:loadHost()
     self.cloud = self:loadCloud()
+    self.page = tonumber(self:option("page", 1)) or 1
+    self.page = self:currentPage()   -- 钳制旧设置里的越界值
     self.dash_widget = nil
     self._auto_timer = nil
     self._resume_tick = nil
@@ -1226,6 +1322,10 @@ function KindleDash:addToMainMenu(menu_items)
                 UIManager:show(InfoMessage:new{
                     text = "DayPane v" .. VERSION .. "\n"
                        .. self:label("Image sources: LAN > Cloud > Cache\n", "取图顺序：局域网 PC > 云端 Pages > 本地缓存\n")
+                       .. self:label("3 pages: dashboard / slow info / reading\n",
+                                     "三页：现状看板 / 慢信息 / 闲读\n")
+                       .. self:label("Swipe left/right or tap the screen sides to change pages\n",
+                                     "左右滑或点按屏幕两侧换页，不会自动轮播\n")
                        .. self:tr("看板显示期间保持常亮并定时刷新\n")
                        .. self:tr("AI 额度走局域网实时，关机显示最后值\n")
                        .. self:tr("顶部下滑/顶部点击返回看板退出"),

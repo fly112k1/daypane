@@ -1,6 +1,8 @@
 # DayPane — Kindle E-Ink Dashboard with KOReader
 
 > v0.3.4: While the dashboard is visible, hold-awake mode is enabled by default. Manual sleep pauses updates until wake; recurring RTC wake is disabled by default. Wi-Fi management and automatic radio shutdown are opt-in. Only Wi-Fi started by this plugin is shut down. Replace the plugin folder as a whole; runtime.lua is obsolete.
+>
+> In development (0.4.0, not yet released): three gesture-switched pages — dashboard, slow information (solar terms, moon phase, daylight, coming days) and a quiet reading sentence. Pages are never auto-rotated; only page 1 has a cloud fallback. See [display protocol](docs/PROTOCOL.md).
 
 [简体中文](README.zh-CN.md) | **English (default)**
 

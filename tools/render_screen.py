@@ -10,8 +10,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 try:
     from layout import load_layout
+    import slowinfo
 except ModuleNotFoundError:
     from tools.layout import load_layout
+    from tools import slowinfo
 LAYOUT = None
 
 def display_now():
@@ -36,6 +38,16 @@ LABELS = {
     '赛程暂不可用': 'Schedule unavailable', '胜': 'W', '负': 'L',
     '无近期战报': 'No recent game', '今日一句': 'Daily Thought',
     '（编辑 data/quotes.txt）': '(Edit data/quotes.en.txt)',
+    # 页 2「慢信息」与页 3「闲读」。固定标签走 tr()，动态句子按 LANG 分叉，
+    # 这样英文版永远不会有中文漏到画布上（render() 末尾有 CJK 关卡）。
+    '慢信息': 'Slow info', '日光': 'Daylight', '往后几天': 'Coming days',
+    '闲读': 'A moment to read', '节气': 'Solar term', '月相': 'Moon phase',
+    '日出日落暂不可用': 'Sun times unavailable',
+    '未来天气暂不可用': 'Forecast unavailable',
+    '天气暂不可用': 'Weather unavailable',
+    '节气信息暂不可用': 'Solar terms unavailable',
+    '（编辑句子库）': '(Edit the quote files in data/)',
+    '左右滑换页': 'Swipe to turn', '顶部点按退出': 'Top to exit',
 }
 
 # 记录画上去的文本：英文版里混进中文就说明漏翻译，在渲染时直接拦住。
@@ -81,6 +93,9 @@ def localized_data(data):
     w = d.get('weather') or {}
     w['city'] = w.get('cityEn') or CITY_EN.get(w.get('city'), w.get('city', ''))
     w['text'] = WEATHER_EN.get(w.get('code'), 'Unknown')
+    # 页 2 的未来几天也自带中文天气描述，英文出图必须一起换掉。
+    for day in (w.get('days') or []):
+        day['text'] = WEATHER_EN.get(day.get('code'), 'Unknown')
     for stock in (d.get('stocks') or {}).get('items', []):
         stock['label'] = stock.get('labelEn') or stock.get('sym', '')
     for clock in (d.get('clocks') or {}).get('items', []):
@@ -579,21 +594,235 @@ def draw_quote(draw, d, y, quotes):
     draw.text((PAD, y), line, fill=BLACK, font=ff)
     return y + F_BODY + 6
 
-def draw_footer(draw, d, y, offline=False, last_ok=None):
+MONTH_EN = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+WEEKDAY_EN = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun']
+
+
+def wrap_lines(draw, text, font, max_w):
+    """按像素宽度折行：中文逐字，英文按单词。用于页 3 的大字句子。"""
+    text = ' '.join((text or '').split())
+    if not text:
+        return []
+    if tw(draw, text, font) <= max_w:
+        return [text]
+    units = text.split(' ') if LANG == 'en' else list(text)
+    sep = ' ' if LANG == 'en' else ''
+    lines, current = [], ''
+    for unit in units:
+        candidate = (current + sep + unit).lstrip() if current else unit
+        if tw(draw, candidate, font) <= max_w or not current:
+            current = candidate
+        else:
+            lines.append(current)
+            current = unit
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _slow_today():
+    now = display_now()
+    tz = (LAYOUT or {}).get('timezone') or 'Asia/Shanghai'
+    return now, now.date(), tz
+
+
+def draw_slow_calendar(draw, d, y):
+    """页 2 · 日历：只陈述「今天在一年里的位置」，没有任何待办或提醒。"""
+    y = draw_title(draw, y, tr('慢信息'))
+    now, today, tz = _slow_today()
+    current, upcoming = slowinfo.term_at(today, tz)
+    (moon_zh, moon_en), age = slowinfo.moon_phase(today, tz)
+    weekend = slowinfo.days_to_weekend(today)
+    holiday = slowinfo.next_fixed_day(today)
+    progress = slowinfo.year_progress(today)
+    fbig, ff, fs = f(F_BIG, bold=True), f(F_BODY), f(F_SMALL)
+    row = F_BODY + 44
+
+    # 第一行：日期 + 年进度
+    if LANG == 'en':
+        date_s = '%s %d, %s' % (MONTH_EN[today.month - 1], today.day, WEEKDAY_EN[today.weekday()])
+        sub = '%d%% of the year' % progress
+    else:
+        date_s = '%d月%d日 周%s' % (today.month, today.day, '一二三四五六日'[today.weekday()])
+        sub = '今年已过 %d%%' % progress
+    draw.text((PAD, y), date_s, fill=BLACK, font=fbig)
+    draw.text((SCREEN_W - PAD - tw(draw, sub, fs), y + 22), sub, fill=GRAY, font=fs)
+    y += row + 12
+
+    # 第二行：当前节气 + 下一个节气
+    if upcoming:
+        if LANG == 'en':
+            line = '%s · Next: %s in %dd' % (current[1] if current else '—', upcoming[1], upcoming[3])
+        else:
+            line = '%s · 下一个节气 %s（%d 天后）' % (current[0] if current else '—', upcoming[0], upcoming[3])
+    else:
+        # term_at 对任何年份都能算出下一个节气，此分支正常不可达；
+        # 万一走到，也别把节气行写成「天气暂不可用」（早期版本复制错标签）。
+        line = tr('节气信息暂不可用')
+    draw.text((PAD, y), clip(draw, line, ff, CONTENT_W), fill=BLACK, font=ff)
+    y += row
+
+    # 第三行：月相 + 周末
+    if LANG == 'en':
+        weekend_s = 'It is the weekend' if weekend == 0 else 'Saturday in %dd' % weekend
+        line = '%s · %.0f days old · %s' % (moon_en, age, weekend_s)
+    else:
+        weekend_s = '正在周末' if weekend == 0 else '距周六 %d 天' % weekend
+        line = '%s · 月龄 %.0f 天 · %s' % (moon_zh, age, weekend_s)
+    draw.text((PAD, y), clip(draw, line, ff, CONTENT_W), fill=GRAY, font=ff)
+    y += row
+
+    # 第四行：下一个公历固定日子
+    if holiday:
+        zh, en, _, days = holiday
+        if LANG == 'en':
+            line = '%s in %dd' % (en, days) if days else '%s is today' % en
+        else:
+            line = '距%s %d 天' % (zh, days) if days else '今天是%s' % zh
+        draw.text((PAD, y), line, fill=GRAY, font=fs)
+    return y + F_BODY + 6
+
+
+def _daylight(sunrise, sunset):
+    try:
+        a = [int(x) for x in sunrise.split(':')]
+        b = [int(x) for x in sunset.split(':')]
+        minutes = (b[0] * 60 + b[1]) - (a[0] * 60 + a[1])
+        if minutes <= 0 or minutes > 1440:
+            return None
+        return '%dh %02dm' % (minutes // 60, minutes % 60)
+    except (AttributeError, ValueError, IndexError):
+        return None
+
+
+def draw_sun(draw, d, y):
+    """页 2 · 日光：日出日落与昼长。"""
+    y = draw_title(draw, y, tr('日光'))
+    w = d.get('weather') or {}
+    sunrise, sunset = w.get('sunrise'), w.get('sunset')
+    if not (sunrise and sunset):
+        draw.text((PAD, y), tr('日出日落暂不可用'), fill=GRAY, font=f(F_SMALL))
+        return y + F_BODY + 12
+    line = '%s → %s' % (sunrise, sunset)
+    fbig = f(F_BIG, bold=True)
+    draw.text((PAD, y), line, fill=BLACK, font=fbig)
+    span = _daylight(sunrise, sunset)
+    if span:
+        if LANG == 'en':
+            label = 'Daylight %s' % span
+        else:
+            hours, minutes = span.split(' ')
+            label = '昼长 %s 小时 %s 分' % (hours.rstrip('h'), minutes.rstrip('m'))
+        fs = f(F_SMALL)
+        draw.text((SCREEN_W - PAD - tw(draw, label, fs), y + 18), label, fill=GRAY, font=fs)
+    return y + F_BIG + 14
+
+
+def draw_forecast(draw, d, y):
+    """页 2 · 往后几天：三行天气，纯陈述。"""
+    y = draw_title(draw, y, tr('往后几天'), d.get('weather'))
+    days = ((d.get('weather') or {}).get('days') or [])[1:4]
+    ff, fs = f(F_BODY), f(F_SMALL)
+    if not days:
+        draw.text((PAD, y), tr('未来天气暂不可用'), fill=GRAY, font=fs)
+        return y + F_BODY + 12
+    for i, day in enumerate(days):
+        raw = str(day.get('date') or '')
+        try:
+            # provider 给 'MM-DD'，云端快照/历史样本可能是 'YYYY-MM-DD'：
+            # 取最后两段两种格式都能读对，别把年份当成月份画成 "2026月11日"。
+            parts = [int(x) for x in raw.split('-') if x.isdigit()]
+            month, dom = parts[-2], parts[-1]
+            weekday = WEEKDAY_EN[_date_weekday(today_year(), month, dom)] if LANG == 'en' else '一二三四五六日'[_date_weekday(today_year(), month, dom)]
+        except (ValueError, IndexError):
+            month, dom, weekday = 0, 0, ''
+        if LANG == 'en':
+            left = '%s %d %s' % (MONTH_EN[month - 1] if 1 <= month <= 12 else raw, dom, weekday)
+        else:
+            left = '%d月%d日 周%s' % (month, dom, weekday)
+        text = day.get('text') or '—'
+        temps = '%s° / %s°' % (fnum(day.get('high')), fnum(day.get('low')))
+        ry = y + i * (F_BODY + 22)
+        draw.text((PAD, ry), left, fill=BLACK, font=ff)
+        draw.text((PAD + 340, ry), text, fill=GRAY, font=ff)
+        draw.text((SCREEN_W - PAD - tw(draw, temps, ff), ry), temps, fill=BLACK, font=ff)
+    return y + len(days) * (F_BODY + 22)
+
+
+def _date_weekday(year, month, day):
+    from datetime import date as _date
+    try:
+        return _date(year, month, day).weekday()
+    except ValueError:
+        return 0
+
+
+def today_year():
+    return display_now().year
+
+
+def draw_reading(draw, d, y, quotes):
+    """页 3 · 闲读：一句大字、大留白、看完就完。"""
+    y = draw_title(draw, y, tr('闲读'))
+    if not quotes:
+        draw.text((PAD, y + 80), tr('（编辑句子库）'), fill=GRAY, font=f(F_SMALL))
+        return y + 160
+    # 与页 1「今日一句」错开索引，避免滑到第 3 页看到同一句。
+    q = quotes[(display_now().timetuple().tm_yday * 7 + 3) % len(quotes)]
+    if ' —— ' in q:
+        text, source = q.split(' —— ', 1)
+    elif LANG == 'en' and ' - ' in q:
+        text, source = q.split(' - ', 1)
+    else:
+        text, source = q, ''
+    font = f(F_BIG + 12)
+    lines = wrap_lines(draw, text, font, CONTENT_W - 60)[:5]
+    top = y + 220
+    step = F_BIG + 60
+    for i, line in enumerate(lines):
+        draw.text((PAD + (CONTENT_W - tw(draw, line, font)) // 2, top + i * step),
+                  line, fill=BLACK, font=font)
+    bottom = top + len(lines) * step + 30
+    if source:
+        # 不用破折号：1-bit 抖动后单根 em dash 会变成一条波浪状噪声线。
+        src = source.strip()
+        fs = f(F_SMALL)
+        draw.text((SCREEN_W - PAD - tw(draw, src, fs), bottom), src, fill=GRAY, font=fs)
+        bottom += F_SMALL + 10
+    # 页脚已带页码与换页提示，这里不再重复画一行提示 + 分隔线，
+    # 否则两条横线把提示夹成三明治，反而是整页最吵的地方。
+    return bottom + 40
+
+
+def draw_footer(draw, d, y, offline=False, last_ok=None, page=1, pages=1):
     hline(draw, y, GRAY, 1)
     y += 12
     now = display_now().strftime('%H:%M')
-    txt = ('DayPane · 离线 · 最后 %s · 顶部下滑返回' % (last_ok or '?')) if offline \
-        else ('DayPane · 更新 %s · 顶部下滑返回' % now)
+    if pages > 1:
+        tail = ('Page %d/%d · %s' % (page, pages, tr('左右滑换页'))) if LANG == 'en' \
+            else ('第 %d/%d 页 · %s' % (page, pages, tr('左右滑换页')))
+    else:
+        tail = 'Swipe from top to exit' if LANG == 'en' else '顶部下滑返回'
     if LANG == 'en':
-        txt = ('DayPane · Offline · Last %s' % (last_ok or '?')) if offline else 'DayPane · Updated %s · Swipe from top to exit' % now
-    draw.text((PAD, y), txt, fill=GRAY, font=f(F_FOOT))
+        head = ('DayPane · Offline · Last %s' % (last_ok or '?')) if offline else ('DayPane · Updated %s' % now)
+    else:
+        head = ('DayPane · 离线 · 最后 %s' % (last_ok or '?')) if offline else ('DayPane · 更新 %s' % now)
+    txt = head + ' · ' + tail
+    fs = f(F_FOOT)
+    draw.text((PAD, y), clip(draw, txt, fs, CONTENT_W), fill=GRAY, font=fs)
     return y + F_FOOT
 
 # ---------- 主流程 ----------
-def render(d, out_path=None, language="zh"):
+def render(d, out_path=None, language="zh", page=1, pages=1):
+    """page 从 1 起；pages>1 时页脚显示页码。
+
+    默认 pages=1 是刻意的：云端 Pages 只有一张图（build_site.py 不带分页参数），
+    显示「1/3 · 左右滑换页」却滑不动会误导人。只有本机 :8787 的多页模式才传 3。
+    """
     global LANG
     LANG = language
+    page = page if page in (1, 2, 3) else 1
+    pages = max(1, min(3, int(pages or 1)))
     global LAYOUT, SCREEN_W, SCREEN_H, CONTENT_W
     LAYOUT = load_layout(os.environ.get('SHAWN_CONFIG', 'config.json'))
     # Compose at a readable portrait ratio, then scale to the selected screen.
@@ -627,16 +856,32 @@ def render(d, out_path=None, language="zh"):
         'clocks': lambda y: draw_clocks(draw, d, y),
         'mlb': lambda y: draw_mlb(draw, d, y),
         'quote': lambda y: draw_quote(draw, d, y, quotes),
+        'slow_calendar': lambda y: draw_slow_calendar(draw, d, y),
+        'sun': lambda y: draw_sun(draw, d, y),
+        'forecast': lambda y: draw_forecast(draw, d, y),
     }
-    mods = [registry[name] for name in LAYOUT['modules']]
-    for fn in mods:
-        y = fn(y)
-        hline(draw, y + 4, GRAY, 1)
-        y += 14
-    y = draw_footer(draw, d, y)
+    if page == 2:
+        y += 40   # 慢信息页先给一点呼吸空间，别把内容顶在日期横线下
+    if page == 3:
+        # 闲读页刻意留白：不画模块之间的分隔线。
+        y = draw_reading(draw, d, y, quotes)
+    else:
+        mods = [registry['slow_calendar'], registry['sun'], registry['forecast']] if page == 2 \
+            else [registry[name] for name in LAYOUT['modules']]
+        # 页 2 只有三个模块，间距放宽一点才不像一张挤在顶部的清单。
+        gap = 34 if page == 2 else 14
+        for fn in mods:
+            y = fn(y)
+            hline(draw, y + 8, GRAY, 1)
+            y += gap
+    content_bottom = y
+    # 页脚固定贴底：页 1 内容多时自然接在后面，页 2/3 内容少时也不会
+    # 把 "DayPane · 更新 …" 挂在半屏中间、下面空掉一大截。
+    y = draw_footer(draw, d, max(content_bottom, SCREEN_H - F_FOOT - 40),
+                    page=page, pages=pages)
 
-    print('[render] final_y=%d screen_h=%d margin=%d' % (y, SCREEN_H, SCREEN_H - y), file=sys.stderr, flush=True)
-    if y > SCREEN_H - 12:
+    print('[render] final_y=%d content_bottom=%d screen_h=%d' % (y, content_bottom, SCREEN_H), file=sys.stderr, flush=True)
+    if content_bottom > SCREEN_H - F_FOOT - 50:
         raise ValueError('Layout exceeds screen height; reduce modules or font scale')
     # 英文版绝不能出现中文：在缩放 + Floyd-Steinberg 抖动（整屏最贵的一步）
     # 之前就拦住，漏翻译时立刻失败，不白跑一遍图像处理。
@@ -659,6 +904,8 @@ def main():
     ap.add_argument('--out')
     ap.add_argument('--data')
     ap.add_argument('--url', default='http://127.0.0.1:8787/api/dashboard')
+    ap.add_argument('--page', type=int, default=1, help='page number: 1 dashboard, 2 slow info, 3 reading')
+    ap.add_argument('--pages', type=int, default=1, help='total pages; >1 shows a page indicator')
     ap.add_argument('--check-fonts', action='store_true',
                     help='只校验字体能否渲染中文，失败则以非零码退出（CI 用）')
     a = ap.parse_args()
@@ -689,7 +936,7 @@ def main():
             d = json.load(source)
     else:
         d = fetch_dashboard(a.url)
-    render(d, a.out, a.lang)
+    render(d, a.out, a.lang, a.page, a.pages)
 
 if __name__ == '__main__':
     main()

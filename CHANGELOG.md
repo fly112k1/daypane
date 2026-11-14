@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## Unreleased (0.4.0)
+
+- Three pages on the Kindle, switched only by user gesture (swipe left/right, or tap the left/right 22% of the screen): 1 dashboard / 2 slow information / 3 reading. No auto-rotation, no tasks, no reminders, no external note system. The top-edge tap/swipe-down exit is unchanged.
+- Page 2 is computed locally with zero network and zero dependencies: date, year progress, current and next solar term (Meeus low-precision solar longitude, works for any year), moon phase and age, sunrise/sunset and daylight length, the next three days of weather, weekend and fixed Gregorian days. Page 3 reads a plain local text file.
+- `/api/display` and `/api/screen` accept `page=1|2|3`; the manifest echoes `page` and `pages: 3`. Render deduplication is keyed by language + page; the in-memory image cache grew to 12 entries so a page just visited does not get evicted before the device fetches it. Cloud Pages keeps a single page-1 image and never shows a misleading page indicator.
+- Each page has its own persistent cache and timestamp on the device. Switching pages invalidates any in-flight refresh, immediately shows that page's last image (no white/black flash), then silently fetches a fresh one. Pages 2/3 have no cloud fallback on purpose: the cloud image is the dashboard, not slow information.
+- Weather provider now requests 4 days plus sunrise/sunset in one call, so page 2 does not add a data source or an extra request. Forecast date parsing handles both `MM-DD` and `YYYY-MM-DD`.
+- Only the visible page is refreshed. Page 1 keeps the configured 30-minute cadence; pages 2/3 relax to two hours because their content changes daily, which avoids a full e-ink flash every half hour on an unchanged poem. Flipping back to page 1 re-arms the 30-minute timer immediately.
+- Requests with no `page` parameter are treated as legacy single-page clients: the manifest says `pages: 1` and the PNG has no page indicator, so an already-installed v0.3.4 plugin never shows a swipe hint it cannot honour.
+- Regression baseline: Node 48/48, Python 25/25, eslint clean, Lua syntax check clean. New tests cover page clamping/coalescing, per-page caches and URLs, gestures and preemption, solar terms across several years, and all three pages in both languages with CJK-leak detection.
+- 三页轮播（左右滑 / 点按两侧），只由用户手势切换，绝不自动轮播：1 现状看板 / 2 慢信息 / 3 闲读。不接任务、提醒、笔记系统；顶部点按与下滑退出不变。页 2 的节气、月相、昼长、周末与公历节日全部本地计算，不联网；页 3 只读本地纯文本句子库。每页独立持久缓存，切页先秒显旧图再静默取新图，不闪白不黑屏。
 
 ## 0.3.4 (2026-11-14)
 
