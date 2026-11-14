@@ -63,6 +63,21 @@ test('context is the same numbers as the legacy token field', () => {
   assert.equal(s.context, s.token); // 同一个引用：别再往 token 里塞新语义
 });
 
+test('numeric strings from SQLite are accepted, garbage is not', () => {
+  const s = computeStatus({ used: '250', size: '1000', credit_json: '{"a":"1.5","b":2,"c":"skip"}' });
+  assert.equal(s.context.used, 250);
+  assert.equal(s.context.remaining, 750);
+  assert.equal(s.creditUsed, 3.5);
+  assert.equal(s.creditCount, 2);
+  assert.equal(computeStatus({ used: 'abc', size: Infinity }).context.used, null);
+});
+
+test('negative usage cannot make remaining exceed the window', () => {
+  const s = computeStatus({ used: -100, size: 1000 });
+  assert.equal(s.context.remaining, 1000);
+  assert.equal(s.context.percent, 0);
+});
+
 test('formatStatus renders a readable string', () => {
   const out = formatStatus(computeStatus({ used: 100, size: 1000, model: 'hy3', title: 't' }));
   assert.match(out, /model=hy3/);

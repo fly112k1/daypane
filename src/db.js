@@ -59,12 +59,15 @@ export function readStatus(db, { cwdFilter = '' } = {}) {
     return computeStatus({ source: 'empty', staleAfterMs });
   }
 
+  // session_usage 没有主键，同一个 session 可能有多行。没有 ORDER BY 时
+  // SQLite 返回哪一行是不确定的 —— 必须明确取最新的一条。
   let usage = db
     .prepare(
       `
       SELECT used, size, updated_at, credit_json
       FROM session_usage
       WHERE session_id = ?
+      ORDER BY updated_at DESC
       LIMIT 1
     `
     )
@@ -75,6 +78,8 @@ export function readStatus(db, { cwdFilter = '' } = {}) {
   if (!usage) {
     // 回退时必须连 usage 所属会话一起取出来：size 由 model 决定，
     // 拿 A 会话的 model 配 B 会话的 used/size 会得出完全错误的百分比。
+    // 同时排除已删除会话和"孤儿 usage"（LEFT JOIN 会把它们带进来，
+    // 那时 owner_id 为空，数字就会错配到 latestSession 上）。
     const fb = (scoped) =>
       db
         .prepare(
@@ -83,8 +88,9 @@ export function readStatus(db, { cwdFilter = '' } = {}) {
                  s.id AS owner_id, s.model AS owner_model, s.title AS owner_title,
                  s.status AS owner_status, s.last_activity_at AS owner_last_activity_at
           FROM session_usage u
-          LEFT JOIN sessions s ON s.id = u.session_id
-          ${scoped ? 'WHERE s.cwd = ?' : ''}
+          JOIN sessions s ON s.id = u.session_id
+          WHERE s.deleted_at IS NULL
+          ${scoped ? 'AND s.cwd = ?' : ''}
           ORDER BY u.updated_at DESC
           LIMIT 1
         `

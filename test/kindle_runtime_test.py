@@ -8,6 +8,17 @@ from PIL import Image
 import kindle_plugin_test as harness
 
 lua = harness.lua
+# Windows 的 os.rename 不允许覆盖已存在文件，Kindle（Linux）允许。
+# 这个差异曾让整套 Python 测试长期红一项，但插件的契约是"失败时保留旧缓存"，
+# 不该为了迁就测试机去改插件。这里只在测试进程里显式模拟设备的 POSIX 语义。
+lua.execute('''
+RENAME_RAW = os.rename
+local function exists(p) local f = io.open(p, 'rb'); if f then f:close(); return true end; return false end
+os.rename = function(a, b)
+    if exists(b) then os.remove(b) end
+    return RENAME_RAW(a, b)
+end
+''')
 lua.execute("SHA=dofile(PLUGIN_DIR..'sha256.lua'); Plugin.sha256=SHA")
 
 
@@ -48,6 +59,24 @@ class RuntimeTests(unittest.TestCase):
             assert(not d:writePng(CACHE,'bad image'))
             ''')
         lua.globals().DECODE_FAIL = False
+
+    def test_manifest_failure_falls_back_to_direct_image(self):
+        out = io.BytesIO()
+        Image.new('L', (1072, 1448), 255).save(out, 'PNG')
+        lua.globals().PNG = out.getvalue()
+        lua.execute('''
+        local d = Plugin:new{language='en'}
+        d.ensureCacheDir = function() end
+        d.cacheImg = function() return '/tmp/fallback.png' end
+        d.readMetadata = function() return {} end
+        d.endpoints = function() return {{url='http://pc/api/screen?lang=en', name='LAN'}} end
+        d.request = function(_, url)
+            if url:match('/api/display') then return nil, '404' end
+            return PNG
+        end
+        local bytes, err = d:fetchScreen()
+        assert(bytes == PNG and err == nil, 'old servers without /api/display must still work')
+        ''')
 
     def test_network_deadline_backoff_and_success_reset(self):
         lua.execute('''

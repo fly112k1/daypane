@@ -36,7 +36,9 @@ local logger = require("logger")
 local JSON = require("json")
 
 -- 网络请求超时：电脑关机时不要让用户等太久，8 秒无响应就切换下一级。
-http.TIMEOUT = 8
+-- 只在本次请求期间生效：socket.http 是 KOReader 全局模块，永久把它改成 8 秒
+-- 会连累 OPDS 下载、同步等其它功能的超时策略（见 request() 里的 save/restore）。
+local REQUEST_TIMEOUT = 8
 
 local VERSION = "0.3.3"
 local REFRESH_SEC = 30 * 60
@@ -448,11 +450,19 @@ end
 
 function KindleDash:endpoints()
     local list = {}
-    if self.host and self.host ~= "" then
-        table.insert(list, { url = "http://" .. self.host .. "/api/screen?lang=" .. (self.language or "zh"), name = self:tr("本机") })
+    local lang = self.language == "en" and "en" or "zh"
+    -- 设置对话框里用户手输的内容要洗干净：粘了 "http://" 前缀、尾部斜杠或
+    -- 空格时，以前会拼出 "http://http://host//api/screen" 这种永远连不上的 URL。
+    local host = tostring(self.host or ""):match("^%s*(.-)%s*$") or ""
+    host = host:gsub("^https?://", ""):gsub("/+$", "")
+    if host ~= "" and not host:find("%s") then
+        table.insert(list, { url = "http://" .. host .. "/api/screen?lang=" .. lang, name = self:tr("本机") })
     end
-    if self.cloud and self.cloud ~= "" then
-        table.insert(list, { url = self.cloud, name = self:tr("云端") })
+    local cloud = tostring(self.cloud or ""):match("^%s*(.-)%s*$") or ""
+    -- 只允许 http(s)：request() 里虽然也会拦，但别让非法 scheme 混进图源列表
+    -- 变成一条"永远失败"的降级分支，污染健康日志。
+    if cloud:match("^https?://%S+$") then
+        table.insert(list, { url = cloud, name = self:tr("云端") })
     end
     return list
 end
@@ -499,7 +509,10 @@ function KindleDash:request(url, limit)
         if not ca then return nil, "CA bundle missing" end
         req.cafile, req.verify, req.protocol = ca, "peer", "tlsv1_2"
     end
+    local previous_timeout = http.TIMEOUT
+    http.TIMEOUT = REQUEST_TIMEOUT
     local ok, result, status = pcall(http.request, req)
+    http.TIMEOUT = previous_timeout
     if not ok or not result or tonumber(status) ~= 200 then
         return nil, "HTTP/network: " .. tostring(status or result)
     end
@@ -536,6 +549,25 @@ function KindleDash:fetchScreen()
                 url = resolve(manifest_url, value.image_url)
                 if not url then error_message = "Invalid image URL" end
             end
+        end
+        -- 清单挂了不等于图片挂了：老版本 PC 服务没有 /api/display，
+        -- 或 GitHub Pages 偶发 404。此时直接取原始图片 URL —— 少了 sha
+        -- 校验，但仍有 PNG 头、RenderImage 解码和尺寸校验三道兜底，
+        -- 比直接掉到"本地缓存/离线"好得多。
+        local direct_body
+        if error_message and manifest_url then
+            local body, err = self:request(ep.url, MAX_IMAGE)
+            if body and body:sub(1, 8) == "\137PNG\13\10\26\10" then
+                direct_body = body
+                error_message = nil
+                meta = {}
+            else
+                error_message = tostring(error_message) .. "; direct: " .. tostring(err or "Invalid PNG")
+            end
+        end
+        if direct_body then
+            self._candidate_meta = { source = ep.name }
+            return direct_body, nil, ep.name, false
         end
         if not error_message then
             local old = self:readMetadata()
@@ -599,9 +631,18 @@ function KindleDash:writePng(path, bytes)
     end
     local renamed = os.rename(tmp, path)
     if not renamed then os.remove(tmp); return nil, "Cache rename failed" end
+    -- 图片缓存换了内容：下一次 showDashboard 必须真的重建 widget，
+    -- 不能因为路径没变就跳过上屏（下面的 showDashboard 有同路径短路）。
+    self._shown_path = nil
     meta.downloadedAt = os.time() * 1000
-    local mf = io.open(path .. ".json.tmp", "wb")
-    if mf then mf:write(JSON.encode(meta)); mf:close(); os.rename(path .. ".json.tmp", path .. ".json") end
+    -- 元数据临时文件也要唯一：图片那份已经按 _write_seq 区分了，
+    -- 这份还共用固定 .json.tmp 时，并发刷新会互相截断 JSON。
+    local mtmp = path .. ".json.tmp." .. tostring(self._write_seq)
+    local mf = io.open(mtmp, "wb")
+    if mf then
+        mf:write(JSON.encode(meta)); mf:close()
+        if not os.rename(mtmp, path .. ".json") then os.remove(mtmp) end
+    end
     return true
 end
 
@@ -633,26 +674,28 @@ function KindleDash:buildScreen(img_path, w, h)
         if ges and ges.pos and ges.direction == "south" and ges.pos.y < h * 0.25 then self:onClose() end
         return true
     end
-    function container:onClose()
+    -- 关闭逻辑只有一份：Kindle 无返回键，退出入口是顶部点按/下滑 (onClose)
+    -- 和机型的物理返回 (onBack)。以前两份复制粘贴，改一处漏一处就会
+    -- 出现"关掉了但仍在常亮/仍在定时刷新"这类半关闭状态。
+    local function closeDashboard(widget)
         -- 先标记已关闭再关窗：否则后台刷新会误判成"看板正显示"。
         dash._generation = (dash._generation or 0) + 1
         dash._busy = false
         dash:releaseNetwork()
         dash.dash_widget = nil
+        dash._shown_path = nil
+        dash._shown_offline = nil
         -- 看板不在了：停止定时刷新，也不再阻止设备休眠。
         dash:holdScreen(false)
         dash:armAutoRefresh()
-        UIManager:close(self)
+        UIManager:close(widget)
+    end
+    function container:onClose()
+        closeDashboard(self)
         return true
     end
     function container:onBack()
-        dash._generation = (dash._generation or 0) + 1
-        dash._busy = false
-        dash:releaseNetwork()
-        dash.dash_widget = nil
-        dash:holdScreen(false)
-        dash:armAutoRefresh()
-        UIManager:close(self)
+        closeDashboard(self)
         return true
     end
     function container:onResume()
@@ -669,6 +712,12 @@ function KindleDash:buildScreen(img_path, w, h)
 end
 
 function KindleDash:showDashboard(path, offline)
+    -- 离线时每 30 分钟都会走一次"用旧缓存顶上"。图片字节没变还去重建
+    -- ImageWidget 会触发一次全屏 e-ink 刷新并白白解码 4MB 以内的 PNG。
+    -- 只有文件真的换了（writePng 会清掉 _shown_path）才重新上屏。
+    if self.dash_widget and self._shown_path == path and self._shown_offline == offline then
+        return true
+    end
     local previous = self.dash_widget
     local ok, result = pcall(self.buildScreen, self, path, Screen:getWidth(), Screen:getHeight())
     if not ok then
@@ -680,6 +729,8 @@ function KindleDash:showDashboard(path, offline)
     UIManager:show(result)
     if previous then UIManager:close(previous) end
     self.dash_widget = result
+    self._shown_path = path
+    self._shown_offline = offline
     -- 看板已在屏上：进入常亮模式，让 UI 定时器能按点刷新。
     if self:option("hold_screen", true) and not self._suspended then
         self:holdScreen(true)

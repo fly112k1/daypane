@@ -22,7 +22,11 @@ import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-TOKEN_FILE = r"C:/Users/Shen/.workbuddy/binaries/gh/token.txt"
+# 不要把本机用户名写进公开仓库；优先用环境变量，退回当前用户目录。
+TOKEN_FILE = os.environ.get(
+    "GITHUB_TOKEN_FILE",
+    os.path.join(os.path.expanduser("~"), ".workbuddy", "binaries", "gh", "token.txt"),
+)
 REPO_NAME = "daypane"
 WORKFLOW = "render.yml"
 API = "https://api.github.com"
@@ -93,7 +97,8 @@ def push(tok, login):
         print("[push] add remote:", out.strip())
     rc, out = run(["git", "push", "-u", "origin", "main"])
     print("[push] rc=%d" % rc)
-    print(out.strip()[-800:])
+    # git 报错时可能把带 token 的 remote URL 原样回显，别把它写进终端/CI 日志。
+    print(out.replace(tok, "***").strip()[-800:])
     if rc != 0:
         sys.exit("[push] 推送失败")
     # 立刻把带 token 的 remote 换掉，避免明文 token 落在 .git/config
@@ -110,10 +115,13 @@ def dispatch(tok, login):
 
 
 def enable_pages(tok, login):
+    # render.yml 走 upload-pages-artifact / deploy-pages，Pages 源必须是
+    # GitHub Actions，而不是 gh-pages 分支。以前这里把源设成分支，
+    # 会把云端渲染产物彻底断开（部署成功但页面永远不更新）。
     st, body = api("POST", "/repos/%s/%s/pages" % (login, REPO_NAME),
-                   {"source": {"branch": "gh-pages", "path": "/"}}, tok=tok)
+                   {"build_type": "workflow"}, tok=tok)
     if st in (201, 200, 409):
-        print("[pages] 已开启 (branch=gh-pages)")
+        print("[pages] 已开启 (source=GitHub Actions)")
         return
     print("[pages] rc=%s %s" % (st, body))
 

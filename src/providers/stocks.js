@@ -45,7 +45,7 @@ function currencyFor(mkt) {
 }
 
 async function fetchBatch(codes) {
-  const url = GTIMG + codes.join(',');
+  const url = GTIMG + codes.map(encodeURIComponent).join(',');
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 9000);
   try {
@@ -60,7 +60,7 @@ async function fetchBatch(codes) {
 }
 
 async function fetchKline(code) {
-  const url = `${KLINE}?param=${code},day,,,30,qfq`;
+  const url = `${KLINE}?param=${encodeURIComponent(code)},day,,,30,qfq`;
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 9000);
   try {
@@ -68,8 +68,7 @@ async function fetchKline(code) {
       signal: ctrl.signal,
       headers: { 'User-Agent': 'Mozilla/5.0' }
     });
-    const text = await res.text();
-    const j = JSON.parse(text);
+    const j = JSON.parse(await res.text());
     const node = j && j.data && j.data[code];
     const bars = (node && (node.qfqday || node.day)) || [];
     const dates = [];
@@ -90,13 +89,17 @@ async function fetchKline(code) {
   }
 }
 
-// Fetch a ~30 trading day close series for every configured stock, in parallel.
+// Fetch a ~30 trading day close series for configured stocks, in parallel.
+// 单个 symbol 最多花 12 秒（3 个候选各 9 秒太久了），超预算就放弃走势图，
+// 不能让一组 K 线把整块看板拖到超时。
 async function getSparks(list) {
   const results = {};
+  const deadline = Date.now() + 12000;
   await Promise.all(
     list.map(async (s) => {
       const candidates = toKlineCode(s);
       for (const code of candidates) {
+        if (Date.now() > deadline) return;
         const spark = await cached(
           `kline:${code}`,
           5 * 60 * 1000,
@@ -115,7 +118,9 @@ async function getSparks(list) {
 // 外层再包一层 cached：里层只缓存原始批次文本，最终返回值不经过 cached 就不会有
 // fetchedAt，也享受不到失败降级。包一层即可跟其他 provider 行为一致。
 export async function getStocks() {
-  return cached('stocks', 60 * 1000, () => buildStocks());
+  // 配置里换掉关注列表后，旧列表的缓存不能继续命中。
+  const symbols = (getConfig().stocks || []).map((s) => s.sym + '/' + s.mkt).join(',');
+  return cached('stocks:' + symbols, 60 * 1000, () => buildStocks());
 }
 
 async function buildStocks() {
@@ -125,7 +130,7 @@ async function buildStocks() {
   const codes = list.map(toGtimgCode);
   let text = '';
   try {
-    text = await cached('stocks:all', 60 * 1000, () => fetchBatch(codes));
+    text = await cached('stocks:batch:' + codes.join(','), 60 * 1000, () => fetchBatch(codes));
   } catch (e) {
     return { ok: false, error: e.message, items: [] };
   }
@@ -137,8 +142,6 @@ async function buildStocks() {
     if (!m) continue;
     byCode.set(m[1].toLowerCase(), m[2]);
   }
-
-  const sparks = await getSparks(list);
 
   const items = list.map((s, i) => {
     const code = codes[i].toLowerCase();
@@ -162,7 +165,7 @@ async function buildStocks() {
       change = Math.round((price - prev) * 100) / 100;
       changePct = Math.round(((price - prev) / prev) * 10000) / 100;
     }
-    const item = {
+    return {
       sym: s.sym,
       ok: true,
       name: label,
@@ -174,10 +177,16 @@ async function buildStocks() {
       label,
       mkt: s.mkt
     };
-    const spark = sparks[s.sym];
-    if (spark) item.spark = spark; // { dates: string[], closes: number[] }
-    return item;
   });
 
+  // 行情整批失败时不要再发 8~24 个 K 线请求，更不要把"全是 --"标成 ok:true
+  // （云端 build_site 用 sections.stocks.ok 判断数据源是否可用）。
+  const valid = list.filter((s, i) => items[i].ok);
+  if (!valid.length) return { ok: false, error: 'no usable quotes', items };
+
+  const sparks = await getSparks(valid);
+  for (const item of items) {
+    if (sparks[item.sym]) item.spark = sparks[item.sym]; // { dates, closes }
+  }
   return { ok: true, items };
 }

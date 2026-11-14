@@ -19,25 +19,36 @@ const wmo = (c) => WMO[c] ?? `码${c}`;
 export async function getWeather() {
   const { lat, lon, city } = getConfig().weather;
   const url =
-    `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+    `https://api.open-meteo.com/v1/forecast?latitude=${encodeURIComponent(lat)}&longitude=${encodeURIComponent(lon)}` +
     `&current=temperature_2m,weather_code,relative_humidity_2m` +
     `&daily=weather_code,temperature_2m_max,temperature_2m_min` +
     `&timezone=auto&forecast_days=1`;
 
-  return cached('weather', 10 * 60 * 1000, async () => {
+  // 配置可在服务运行中热改。key 里必须带上坐标和城市名，否则改了城市之后的
+  // 10 分钟里，画面会显示"新城市 + 老城市的温度"，还带着旧的 fetchedAt。
+  return cached('weather:' + city + ':' + lat + ',' + lon, 10 * 60 * 1000, async () => {
     const r = await fetchJson(url);
     if (!r.ok) return { ok: false, error: r.error, city };
     const c = r.data.current || {};
     const d = (r.data.daily || {});
+    const num = (v) => {
+      const n = Number(v);
+      return v === null || v === '' || v === undefined || !Number.isFinite(n) ? null : n;
+    };
+    // 温度是整块天气卡的主数值：上游返回 null/字符串/"N/A" 时宁可标不可用，
+    // 也不要画出 "null°C  Hnull Lnull" 这种图。
+    const temp = num(c.temperature_2m);
+    if (temp === null) return { ok: false, error: 'invalid weather payload', city };
+    const code = num(c.weather_code);
     return {
       ok: true,
       city,
-      temp: c.temperature_2m,
-      humidity: c.relative_humidity_2m,
-      code: c.weather_code,
-      text: wmo(c.weather_code),
-      high: d.temperature_2m_max?.[0],
-      low: d.temperature_2m_min?.[0],
+      temp,
+      humidity: num(c.relative_humidity_2m),
+      code,
+      text: code === null ? '' : wmo(code),
+      high: num(d.temperature_2m_max?.[0]),
+      low: num(d.temperature_2m_min?.[0]),
       source: 'open-meteo'
     };
   });

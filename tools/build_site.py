@@ -116,20 +116,33 @@ def main():
         'requestedAt': os.environ.get('DISPATCH_REQUESTED_AT', ''),
         'runUrl': 'https://github.com/' + os.environ.get('GITHUB_REPOSITORY', '') + '/actions/runs/' + run_id})
     # Publish an independent English variant, preserving each locale's last good image.
+    # 英文版首发失败（没有上一版可保留）时 build() 会抛异常 —— 以前这会让整个
+    # 脚本退出，连已经生成好的中文站点都不会被部署。主链路必须和英文变体解耦。
     english = output / 'en'
     english.mkdir(exist_ok=True)
-    previous_en = previous_site(args.previous_url.rstrip('/') + '/en' if args.previous_url else None, english)
-    ok_en = build(english, previous_en, lambda: generate('en'), {'runId': run_id,
-        'trigger': os.environ.get('GITHUB_EVENT_NAME', 'local'), 'language': 'en'})
-    (output / 'screen-en.png').write_bytes((english / 'screen.png').read_bytes())
-    page = (english / 'index.html').read_text()
-    for zh, en in {'lang="zh"':'lang="en"', '检查更新时间…':'Checking freshness…',
-                   'Kindle 看板':'Kindle dashboard', '内容已过期 · ':'Stale · ',
-                   '本次生成失败，保留旧图 · ':'Generation failed; previous image retained · ',
-                   '正常 · ':'Ready · ', '图片生成于 ':'Image generated at ',
-                   '（':' (', ' 分钟前）':' minutes ago)', '无法读取生成状态':'Unable to read status'}.items():
-        page = page.replace(zh, en)
-    (english / 'index.html').write_text(page, encoding='utf-8')
+    ok_en = False
+    try:
+        previous_en = previous_site(args.previous_url.rstrip('/') + '/en' if args.previous_url else None, english)
+        ok_en = build(english, previous_en, lambda: generate('en'), {'runId': run_id,
+            'trigger': os.environ.get('GITHUB_EVENT_NAME', 'local'), 'language': 'en'})
+        page = (english / 'index.html').read_text()
+        for zh, en in {'lang="zh"':'lang="en"', '检查更新时间…':'Checking freshness…',
+                       'Kindle 看板':'Kindle dashboard', '内容已过期 · ':'Stale · ',
+                       '本次生成失败，保留旧图 · ':'Generation failed; previous image retained · ',
+                       '正常 · ':'Ready · ', '图片生成于 ':'Image generated at ',
+                       '（':' (', ' 分钟前）':' minutes ago)', '无法读取生成状态':'Unable to read status'}.items():
+            page = page.replace(zh, en)
+        (english / 'index.html').write_text(page, encoding='utf-8')
+        (output / 'screen-en.png').write_bytes((english / 'screen.png').read_bytes())
+    except Exception as e:
+        print('English variant failed; publishing the primary image as fallback:', e, file=sys.stderr)
+        # 删掉可能残留的清单，让 Kindle 走"直接取图"路径，而不是拿旧清单去校验新图。
+        for name in ('manifest.json', 'status.json'):
+            p = english / name
+            if p.exists():
+                p.unlink()
+        (output / 'screen-en.png').write_bytes((output / 'screen.png').read_bytes())
+        ok_en = False
     ok = ok and ok_en
     import shutil
     shutil.copytree('web/setup', output / 'setup', dirs_exist_ok=True)

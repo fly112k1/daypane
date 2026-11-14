@@ -21,19 +21,31 @@
  * 暴跌，也会在新开会话时归零 —— 它不是账户剩余额度，不能当"余额"展示。
  * 真正单调不减、反映"花掉多少"的是 credit_json 的求和。
  */
+// SQLite / 云端快照偶尔把数字写成字符串（"1.5"、"1000"）。以前一律当无效，
+// 于是 credit 少算、上下文显示 n/a。统一在这里收口，且拒绝 Infinity/NaN。
+function finiteNumber(v) {
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  if (typeof v === 'string' && v.trim() !== '') {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
 export function computeStatus(raw = {}) {
   const model = raw.model || 'unknown';
   const title = raw.title || null;
   const status = raw.status || null;
 
-  const used = Number.isFinite(raw.used) ? raw.used : null;
-  const size = Number.isFinite(raw.size) ? raw.size : null;
+  const used = finiteNumber(raw.used);
+  const size = finiteNumber(raw.size);
 
   let remaining = null;
   let percent = null;
   if (used != null && size != null && size > 0) {
-    remaining = Math.max(0, size - used);
-    percent = Math.min(100, Math.max(0, Math.round((used / size) * 1000) / 10));
+    const safeUsed = Math.max(0, used); // 负的 used 不能让"剩余"超过窗口
+    remaining = Math.max(0, size - safeUsed);
+    percent = Math.min(100, Math.max(0, Math.round((safeUsed / size) * 1000) / 10));
   }
 
   // credit_json 形如 { requestId: credit } —— 每次请求的计费累加，
@@ -46,7 +58,7 @@ export function computeStatus(raw = {}) {
       const parsed = JSON.parse(raw.credit_json);
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         credit = parsed;
-        const vals = Object.values(parsed).filter((v) => Number.isFinite(v));
+        const vals = Object.values(parsed).map(finiteNumber).filter((v) => v !== null);
         creditCount = vals.length;
         creditUsed = Math.round(vals.reduce((a, b) => a + b, 0) * 100) / 100;
       }

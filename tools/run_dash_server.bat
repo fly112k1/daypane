@@ -9,6 +9,11 @@ rem 缺少这些变量不会报错，只是不推远端。
 if exist tools\report_secrets.bat call tools\report_secrets.bat
 
 :loop
+rem 常驻服务每次轮询都写一行日志，没人管的话这个文件会无限长。
+rem 超过 5MB 时只留一份 .old，避免撑爆系统盘，也方便回看上一次崩溃前的记录。
+if exist tools\dash_server.log (
+  for %%F in ("tools\dash_server.log") do if %%~zF GTR 5242880 move /y "%%~F" "%%~F.old" > nul
+)
 "%NODE%" src/index.js >> C:\Users\Shen\WorkBuddy\2026-08-16-01-28-56\tools\dash_server.log 2>&1
 echo [%date% %time%] server exited (code %errorlevel%), restarting in 3s... >> C:\Users\Shen\WorkBuddy\2026-08-16-01-28-56\tools\dash_server.log
 timeout /t 3 /nobreak > nul

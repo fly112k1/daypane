@@ -49,7 +49,10 @@ export function redact(data, { keepTitle } = {}) {
 // 这里自己读它，而不是依赖启动脚本 `call` 注入环境变量 —— 看板服务是由守护脚本拉起的
 // 常驻进程，改了 bat 它不一定会重载。每次上报前重新解析，改了配置不用重启服务。
 // 环境变量优先级更高，方便临时覆盖。
-const SECRET_KEYS = ['GITHUB_TOKEN', 'GITHUB_REPO', 'GITHUB_BRANCH', 'REPORT_PATH', 'REPORT_EVERY', 'REPORT_DRY', 'REPORT_KEEP_TITLE'];
+const SECRET_KEYS = [
+  'GITHUB_TOKEN', 'GITHUB_REPO', 'GITHUB_BRANCH', 'REPORT_PATH',
+  'REPORT_EVERY', 'REPORT_DRY', 'REPORT_KEEP_TITLE'
+];
 
 function loadSecrets() {
   const p = join(REPO_ROOT, 'tools', 'report_secrets.bat');
@@ -79,7 +82,11 @@ function resolveSecrets() {
     branch: process.env.GITHUB_BRANCH || file.GITHUB_BRANCH || 'runtime-data',
     path: process.env.REPORT_PATH || file.REPORT_PATH || 'quotas.json',
     dry: process.env.REPORT_DRY === '1' || file.REPORT_DRY === '1',
-    keepTitle: process.env.REPORT_KEEP_TITLE === '1' || file.REPORT_KEEP_TITLE === '1'
+    keepTitle: process.env.REPORT_KEEP_TITLE === '1' || file.REPORT_KEEP_TITLE === '1',
+    // REPORT_EVERY 写在 report_secrets.bat 里以前被完全忽略：后台上报器只从
+    // process.env 读间隔，而守护脚本并不注入这个变量。这里补上，且每次上报
+    // 前重新解析（改 bat 不用重启服务）。
+    everyMs: Number(process.env.REPORT_EVERY || file.REPORT_EVERY) || 0
   };
 }
 
@@ -95,9 +102,9 @@ function collect(db) {
   };
 }
 
-async function pushToGithub(content, { log }) {
-  const { token, repo, branch, path: remotePath } = resolveSecrets();
-  if (branch === 'main' || branch === 'master') {
+async function pushToGithub(content, { log, secrets }) {
+  const { token, repo, branch, path: remotePath } = secrets || resolveSecrets();
+  if (branch === 'main' || branch === 'master' || /\.\.|^\/|\/$/.test(branch)) {
     log('skip push: uploads to source branches are disabled');
     return false;
   }
@@ -105,7 +112,14 @@ async function pushToGithub(content, { log }) {
     log('skip push: need GITHUB_TOKEN and GITHUB_REPO');
     return false;
   }
-  const api = 'https://api.github.com/repos/' + repo + '/contents/' + remotePath;
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    log('skip push: GITHUB_REPO must be owner/name');
+    return false;
+  }
+  // 逐段编码：路径里的空格/中文、分支名里的特殊字符都不能拼进 URL。
+  const encodedPath = String(remotePath).split('/').map(encodeURIComponent).join('/');
+  const encodedBranch = encodeURIComponent(branch);
+  const api = `https://api.github.com/repos/${repo}/contents/${encodedPath}`;
   const headers = {
     Authorization: 'Bearer ' + token,
     Accept: 'application/vnd.github+json',
@@ -114,7 +128,7 @@ async function pushToGithub(content, { log }) {
   };
 
   let sha = null;
-  const getRes = await fetch(api + '?ref=' + branch, { headers, signal: AbortSignal.timeout(15000) });
+  const getRes = await fetch(api + '?ref=' + encodedBranch, { headers, signal: AbortSignal.timeout(15000) });
   if (getRes.ok) {
     const j = await getRes.json();
     sha = j.sha;
@@ -179,7 +193,11 @@ function pushViaGit(content, { log }) {
     const tree = g(['write-tree'], ie);
     const msg = 'chore(quotas): update ' + new Date().toISOString().slice(0, 16).replace('T', ' ');
     const commit = g(['commit-tree', tree, '-p', base, '-m', msg], ie);
-    g(['push', 'origin', `${commit}:refs/heads/${branch}`]);
+    // 只在手动 CLI（--force）才会走到这里。仍然禁止终端交互：凭据失效时
+    // 不能挂住进程等输入，更不能让后台守护脚本把它当成"还活着"。
+    g(['push', 'origin', `${commit}:refs/heads/${branch}`], {
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' }
+    });
     log('pushed via git', commit.slice(0, 8));
     return true;
   } catch (e) {
@@ -197,10 +215,12 @@ export function createQuotaReporter({
   cfg = config,
   log = defaultLog,
   allowGit = false,
-  everyMs = Number(process.env.REPORT_EVERY || 5 * 60 * 1000)
+  everyMs = 0
 } = {}) {
+  // 0 = 用 report_secrets.bat / 环境变量里的 REPORT_EVERY，再退回 5 分钟。
+  const resolvedEvery = everyMs > 0 ? everyMs : (resolveSecrets().everyMs || 5 * 60 * 1000);
   const ackOut = join(dirname(cfg.quotasFile), 'last-upload.json');
-  const maxBackoff = Math.max(everyMs, 30 * 60 * 1000);
+  const maxBackoff = Math.max(resolvedEvery, 30 * 60 * 1000);
 
   let lastAttempt = 0;
   let streak = 0;
@@ -219,7 +239,7 @@ export function createQuotaReporter({
     }
 
     const secrets = resolveSecrets();
-    const changed = shouldUpload(prev, data, Date.now(), force);
+    const changed = shouldUpload(prev, data, Date.now(), force, resolvedEvery);
     const pushText = JSON.stringify(redact(data, secrets), null, 2);
     try {
       mkdirSync(dirname(cfg.quotasFile), { recursive: true });
@@ -234,15 +254,23 @@ export function createQuotaReporter({
     }
     if (secrets.dry) return true;
 
-    const ok = (await pushToGithub(pushText, { log })) || (allowGit && pushViaGit(pushText, { log }));
-    if (ok) writeFileSync(ackOut, pushText);
+    const ok = (await pushToGithub(pushText, { log, secrets })) || (allowGit && pushViaGit(pushText, { log }));
+    if (ok) {
+      // ack 写失败不等于推送失败：以前这里抛出去会被 maybeReport 当成一次
+      // 上传失败，白白发一轮 10→20→30 分钟的退避。
+      try {
+        writeFileSync(ackOut, pushText);
+      } catch (e) {
+        log('write ack failed:', e.message);
+      }
+    }
     return ok;
   }
 
   function nextDelay() {
-    if (!streak) return everyMs;
+    if (!streak) return resolvedEvery;
     // 推送失败大多是令牌失效，几分钟内重试没意义：指数退避到最多 30 分钟。
-    return Math.min(everyMs * Math.pow(2, streak), maxBackoff);
+    return Math.min(resolvedEvery * Math.pow(2, streak), maxBackoff);
   }
 
   // fire-and-forget：绝不阻塞请求，也绝不抛给调用方。

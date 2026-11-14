@@ -36,12 +36,15 @@ function schema(db) {
 }
 
 function build(path, rows) {
-  try {
-    unlinkSync(path);
-    unlinkSync(path + '-wal');
-    unlinkSync(path + '-shm');
-  } catch {
-    /* not exists */
+  // 每个文件单独 try：以前主库不存在时第一次 unlinkSync 就抛了，
+  // 后面 -wal / -shm 根本没走到。残留的 WAL 会被下一次打开的数据库重放，
+  // 让 fixture 里混进上一轮的会话，测试变成随机失败。
+  for (const f of [path, path + '-wal', path + '-shm']) {
+    try {
+      unlinkSync(f);
+    } catch {
+      /* not exists */
+    }
   }
   const db = new Database(path);
   // Guarantee a clean slate even if the file was locked and not deleted.

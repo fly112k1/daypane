@@ -5,7 +5,7 @@
 16 级灰度（GRAY=128 / LIGHT_GRAY=200）最终 Floyd-Steinberg 抖动转 1-bit PNG。
 静态数据（句子库）从 data/ 读；新闻/节日/时钟/额度均由服务端提供。
 """
-import sys, os, json, math, re, urllib.request, argparse
+import sys, os, json, math, re, time, urllib.request, argparse
 from datetime import datetime
 from zoneinfo import ZoneInfo
 try:
@@ -139,14 +139,14 @@ def _pick_font(env_key, candidates, fallback):
 
 
 def _font_candidates():
-    if os.name == 'nt':
-        return LINUX_REG + [WIN_REG], LINUX_BOLD + [WIN_BOLD]
+    # 两套都留着：Windows 本机可能只有雅黑，CI/容器里只有 Noto CJK。
+    # 兜底必须是候选里的第一个，不能在 Linux 上退回一个 Windows 绝对路径。
     return LINUX_REG + [WIN_REG], LINUX_BOLD + [WIN_BOLD]
 
 
 _REG_CANDS, _BOLD_CANDS = _font_candidates()
-FONT_REG = _pick_font('SHAWN_FONT_REG', _REG_CANDS, WIN_REG)
-FONT_BOLD = _pick_font('SHAWN_FONT_BOLD', _BOLD_CANDS, WIN_BOLD)
+FONT_REG = _pick_font('SHAWN_FONT_REG', _REG_CANDS, _REG_CANDS[0])
+FONT_BOLD = _pick_font('SHAWN_FONT_BOLD', _BOLD_CANDS, _BOLD_CANDS[0])
 
 F_DATE = 96
 F_MONTH = 46
@@ -205,7 +205,8 @@ def check_fonts():
         d.text((0, 10), '中文测试道奇教士', font=ft, fill=0)
         bb = d.textbbox((0, 10), '中文测试道奇教士', font=ft)
         wpx = bb[2] - bb[0]
-        ink = sum(1 for y in range(80) for x in range(1200) if img.load()[x, y] < 128)
+        # 直方图是 C 实现；以前逐像素 1200*80 次 Python 循环只为数墨迹。
+        ink = sum(img.histogram()[:128])
         good = wpx >= 200 and ink > 200
         info.append('%s: %s  中文8字宽=%dpx 墨迹=%d  %s'
                     % (tag, os.path.basename(path), wpx, ink, 'OK' if good else '字形缺失!'))
@@ -219,12 +220,24 @@ def tw(draw, s, font):
     return b[2] - b[0]
 
 def clip(draw, s, font, max_w):
+    """按像素宽度截断；二分找最长前缀，别每删一个字就重排一次文本。
+
+    以前是 while s: s = s[:-1]，每个字符都要跑一次 PIL 的 textbbox（含字体
+    shaping）。长标题 O(n²) 次，整屏渲染里这是最贵的一段纯 Python 循环。
+    """
     if tw(draw, s, font) <= max_w:
         return s
     ell = '…'
-    while s and tw(draw, s + ell, font) > max_w:
-        s = s[:-1]
-    return s + ell
+    if tw(draw, ell, font) > max_w:
+        return ''
+    lo, hi = 0, len(s)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if tw(draw, s[:mid] + ell, font) <= max_w:
+            lo = mid
+        else:
+            hi = mid - 1
+    return s[:lo] + ell
 
 # 自然断句：在标点/空格后切分（零宽 lookbehind，标点保留在前一段末尾）
 _SENT_SPLIT = re.compile(r'(?<=[，,。；;！？!?、：:\s])')
@@ -282,9 +295,23 @@ def fmt_pct(v):
 
 # ---------- 数据 ----------
 def fetch_dashboard(url='http://127.0.0.1:8787/api/dashboard'):
-    req = urllib.request.Request(url, headers={'User-Agent': 'kindle-dash/1.0'})
-    with urllib.request.urlopen(req, timeout=15) as r:
-        return json.loads(r.read().decode('utf-8'))
+    """本机服务偶发 ECONNREFUSED（刚重启、正在重建缓存）不该让整次出图失败。
+
+    出图失败 = Kindle 拿不到新图 = 退回旧缓存，用户要等下一个半小时。
+    这里只重试一次、间隔 1 秒；真挂了仍然快速失败。
+    """
+    last = None
+    for attempt in range(2):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'kindle-dash/1.0'})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return json.loads(r.read().decode('utf-8'))
+        except Exception as e:
+            last = e
+            if attempt == 0:
+                print('[render] dashboard fetch failed, retrying once: %s' % e, file=sys.stderr, flush=True)
+                time.sleep(1)
+    raise last
 
 def load_quotes():
     p = os.path.join(DATA_DIR, 'quotes.en.txt' if LANG == 'en' else 'quotes.txt')
@@ -427,8 +454,11 @@ def draw_ai(draw, d, y):
         by = ry + 6
         r = bar_h // 2
         draw.rounded_rectangle([bx, by, bx + bar_w, by + bar_h], radius=r, fill=LIGHT_GRAY, outline=BLACK, width=1)
-        fw = max(bar_h, int(bar_w * (pct or 0) / 100))
-        if fw > 2:
+        # 旧云端快照会算出 100 - percent，percent 本身又可能是脏值 → 负数或
+        # >100 会让填充条画出边框；而 max(bar_h, ...) 让 0% 也画一截实心黑。
+        ratio = min(100.0, max(0.0, float(pct) if isinstance(pct, (int, float)) else 0.0))
+        fw = min(bar_w, int(bar_w * ratio / 100.0))
+        if fw > 0:
             draw.rounded_rectangle([bx, by, bx + fw, by + bar_h], radius=r, fill=BLACK)
     return y + len(rows) * (F_BODY + bar_h + gap)
 
@@ -608,13 +638,14 @@ def render(d, out_path=None, language="zh"):
     print('[render] final_y=%d screen_h=%d margin=%d' % (y, SCREEN_H, SCREEN_H - y), file=sys.stderr, flush=True)
     if y > SCREEN_H - 12:
         raise ValueError('Layout exceeds screen height; reduce modules or font scale')
-    img = img.resize((LAYOUT['width'], LAYOUT['height']), Image.Resampling.LANCZOS)
-    out = img.convert('1', dither=Image.Dither.FLOYDSTEINBERG)
-    # 英文版绝不能出现中文：漏翻译在这里直接失败，而不是等哪天有人翻图才发现。
+    # 英文版绝不能出现中文：在缩放 + Floyd-Steinberg 抖动（整屏最贵的一步）
+    # 之前就拦住，漏翻译时立刻失败，不白跑一遍图像处理。
     if language == 'en':
         leaked = _cjk_leak()
         if leaked:
             raise ValueError('English render contains Chinese text: %r' % (leaked[:5],))
+    img = img.resize((LAYOUT['width'], LAYOUT['height']), Image.Resampling.LANCZOS)
+    out = img.convert('1', dither=Image.Dither.FLOYDSTEINBERG)
     if out_path:
         out.save(out_path)
         print('saved', out_path, file=sys.stderr, flush=True)
@@ -646,7 +677,18 @@ def main():
             sys.exit(2)
         print('[font] OK', file=sys.stderr, flush=True)
         return
-    d = json.load(open(a.data, encoding='utf-8')) if a.data else fetch_dashboard(a.url)
+    # 字体缺失时 f() 会退回 load_default：中文全变豆腐块，但退出码仍是 0，
+    # 于是坏图会被当成好图推到 Pages 上。--check-fonts 只有 CI 会显式调用，
+    # 本地/CI 正常出图这条路径也必须拦住。
+    missing = [p for p in (FONT_REG, FONT_BOLD) if not os.path.exists(p)]
+    if missing:
+        print('[render] FAILED: font files missing: ' + ', '.join(missing), file=sys.stderr, flush=True)
+        sys.exit(2)
+    if a.data:
+        with open(a.data, encoding='utf-8') as source:
+            d = json.load(source)
+    else:
+        d = fetch_dashboard(a.url)
     render(d, a.out, a.lang)
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 import { join } from 'node:path';
-import { readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
+import { readdirSync, readSync, openSync, closeSync, statSync, existsSync } from 'node:fs';
+import { StringDecoder } from 'node:string_decoder';
 import { paths, getConfig } from '../config.js';
 
 const WEEK = 7 * 24 * 60 * 60 * 1000;
@@ -15,6 +16,8 @@ const WEEK = 7 * 24 * 60 * 60 * 1000;
 
 let _cache = { at: 0, value: null };
 const CACHE_TTL = 5 * 60 * 1000;
+// 单个 transcript 可能几十 MB；太大就只算会话数，不逐行解析（活动量是估算值）。
+const MAX_SCAN_BYTES = 32 * 1024 * 1024;
 
 export function getClaudeCodeUsage() {
   const cap = getConfig().claudeCap;
@@ -33,28 +36,32 @@ export function getClaudeCodeUsage() {
 
   try {
     const walk = (d) => {
-      let names;
+      let entries;
       try {
-        names = readdirSync(d);
+        // withFileTypes 省掉每个文件一次 stat：目录里往往有几百个非 jsonl 文件，
+        // 以前每个都要 statSync 一遍。
+        entries = readdirSync(d, { withFileTypes: true });
       } catch {
         return;
       }
-      for (const name of names) {
-        const p = join(d, name);
+      for (const e of entries) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) {
+          if (e.name !== 'subagents') walk(p); // skip sub-agent transcripts
+          continue;
+        }
+        if (!e.isFile() || !e.name.endsWith('.jsonl')) continue;
         let st;
         try {
           st = statSync(p);
         } catch {
           continue;
         }
-        if (st.isDirectory()) {
-          if (name !== 'subagents') walk(p); // skip sub-agent transcripts
-        } else if (name.endsWith('.jsonl') && st.mtimeMs >= cutoff) {
-          sessions++;
-          const r = countRecent(p, cutoff);
-          messages += r.messages;
-          if (r.lastModel) lastModel = r.lastModel;
-        }
+        if (st.mtimeMs < cutoff) continue;
+        sessions++;
+        const r = countRecent(p, cutoff, st.size);
+        messages += r.messages;
+        if (r.lastModel) lastModel = r.lastModel;
       }
     };
     walk(dir);
@@ -88,32 +95,56 @@ export function getClaudeCodeUsage() {
   return value;
 }
 
-function countRecent(file, cutoff) {
+// 同步流式读行：不用 readFileSync().split('\n') 把一个几十 MB 的会话
+// 整份读进内存再切成几万个字符串；StringDecoder 保证跨 chunk 的 UTF-8
+// 多字节字符不会被切断。
+function forEachLine(file, onLine) {
+  let fd;
+  try {
+    fd = openSync(file, 'r');
+  } catch {
+    return;
+  }
+  try {
+    const buf = Buffer.allocUnsafe(64 * 1024);
+    const decoder = new StringDecoder('utf-8');
+    let carry = '';
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (!n) break;
+      const lines = (carry + decoder.write(buf.subarray(0, n))).split('\n');
+      carry = lines.pop() ?? '';
+      for (const line of lines) onLine(line);
+    }
+    const tail = carry + decoder.end();
+    if (tail) onLine(tail);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function countRecent(file, cutoff, size) {
   let messages = 0;
   let lastModel = null;
-  try {
-    const lines = readFileSync(file, 'utf-8').split('\n');
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let o;
-      try {
-        o = JSON.parse(line);
-      } catch {
-        continue;
-      }
-      const ts = parseTs(o);
-      if (ts == null || ts < cutoff) continue;
-      if (o.type !== 'message') continue;
-      const role = o.role || (o.message && o.message.role);
-      if (role === 'user' || role === 'assistant') {
-        messages++;
-        const model = o.providerData && o.providerData.model;
-        if (model) lastModel = model;
-      }
+  if (size > MAX_SCAN_BYTES) return { messages, lastModel };
+  forEachLine(file, (line) => {
+    if (!line.trim()) return;
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      return;
     }
-  } catch {
-    /* unreadable file: ignore */
-  }
+    const ts = parseTs(o);
+    if (ts == null || ts < cutoff) return;
+    if (o.type !== 'message') return;
+    const role = o.role || (o.message && o.message.role);
+    if (role === 'user' || role === 'assistant') {
+      messages++;
+      const model = o.providerData && o.providerData.model;
+      if (model) lastModel = model;
+    }
+  });
   return { messages, lastModel };
 }
 

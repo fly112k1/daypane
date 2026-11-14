@@ -123,14 +123,17 @@ export function getMlb() {
     const items = [];
     const errors = [];
 
-    for (const team of TEAMS) {
-      const r = await fetchSchedule(team.id, now);
+    // 两支球队并发拉：以前串行时，一次 StatsAPI 超时（12s + 15s 重试）
+    // 会让第二个队多等一整轮，最坏 54 秒，整块看板被拖住。
+    const results = await Promise.all(TEAMS.map((team) => fetchSchedule(team.id, now)));
+    results.forEach((r, i) => {
+      const team = TEAMS[i];
       if (r.ok && r.data) {
         items.push(buildTeam(team, r.data, now));
       } else {
         errors.push(team.cn + ': ' + (r.error || 'fail'));
       }
-    }
+    });
 
     if (!items.length) {
       return { ok: false, error: errors.join('; ') || 'no mlb data', items: [] };

@@ -21,7 +21,9 @@ import { openDb, closeDb } from '../src/db.js';
 import { config } from '../src/config.js';
 import { createQuotaReporter } from '../src/reporter.js';
 
-const EVERY = Number(process.env.REPORT_EVERY || 5 * 60 * 1000);
+// 不显式给默认值：让 reporter 自己从 report_secrets.bat 读 REPORT_EVERY。
+// 以前这里恒定传 5 分钟，bat 里配的间隔对后台服务完全不起效。
+const EVERY = process.env.REPORT_EVERY ? Number(process.env.REPORT_EVERY) : undefined;
 
 function log(...a) {
   const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false });
@@ -46,7 +48,7 @@ try {
   if (!loop) {
     await reporter.once({ force: args.includes('--force') });
   } else {
-    log('loop mode, every', Math.round(EVERY / 1000), 's');
+    log('loop mode, every', Math.round((EVERY || 5 * 60 * 1000) / 1000), 's');
     // 常驻模式下没有 once() 那样的一次性入口：直接定时触发节流上报。
     for (;;) {
       reporter.maybeReport();

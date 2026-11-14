@@ -13,13 +13,39 @@ const AI_KW = /\bAI\b|人工智能|大模型|LLM|GPT|Claude|Gemini|智能体|Age
 // 量子位/Solidot 里常见的推广、活动、招聘类标题
 const SPAM_KW = /助力|无感迁移|斩获|晋级|国赛|官宣|大会|峰会|直播|报名|招募|招聘|训练营|优惠券|折扣|领衔|生涯|同蚂蚁|国产算力|商汤大装置/;
 
+const ENTITIES = {
+  amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
+  ldquo: '“', rdquo: '”', lsquo: '‘', rsquo: '’', hellip: '…',
+  mdash: '—', ndash: '–', middot: '·', laquo: '«', raquo: '»'
+};
+
+// RSS 的 <title> 里常带 &amp; / &#8217; / &#x201C; —— 以前原样画到 e-ink 上，
+// 读者看到的是 "&amp;" 而不是 "&"。解码后再去标签，避免把转义的标签重新激活。
+function cleanTitle(raw) {
+  return String(raw || '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, code) => {
+      const key = code.toLowerCase();
+      if (key[0] === '#') {
+        const n = key[1] === 'x' ? parseInt(key.slice(2), 16) : parseInt(key.slice(1), 10);
+        if (Number.isFinite(n) && n > 0 && n <= 0x10ffff) {
+          try { return String.fromCodePoint(n); } catch { return m; }
+        }
+        return m;
+      }
+      return Object.prototype.hasOwnProperty.call(ENTITIES, key) ? ENTITIES[key] : m;
+    })
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function parseRssTitles(xml, max) {
-  const items = xml.match(/<item>[\s\S]*?<\/item>/g) || [];
+  const items = xml.match(/<item(?:\s[^>]*)?>[\s\S]*?<\/item>/gi) || [];
   const out = [];
   for (const it of items) {
-    const m = it.match(/<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/);
+    const m = it.match(/<title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/title>/i);
     if (m) {
-      const t = m[1].replace(/\s+/g, ' ').trim();
+      const t = cleanTitle(m[1]);
       if (t) out.push(t);
     }
     if (out.length >= max) break;
@@ -68,7 +94,7 @@ export function getNews(language = 'zh') {
     return cached('news-en', 10 * 60 * 1000, async () => {
       const r = await fetchJson('https://hn.algolia.com/api/v1/search_by_date?query=AI&tags=story&hitsPerPage=12');
       const items = (r.data?.hits || []).filter(h => h.title).slice(0, 6)
-        .map(h => ({ title: h.title, source: 'HN', url: h.url }));
+        .map(h => ({ title: cleanTitle(h.title), source: 'HN', url: h.url }));
       return { ok: r.ok && items.length > 0, items, source: 'HN', error: r.error };
     });
   }
@@ -84,19 +110,15 @@ export function getNews(language = 'zh') {
       ['https://sspai.com/feed', '少数派']
     ];
 
-    // 先抓齐，避免为了两轮筛选重复请求源站
-    const gathered = [];
-    for (const [url, name] of sources) {
-      try {
-        gathered.push({ titles: await fetchRss(url, 20), name });
-      } catch (e) {
-        errors.push(name + ': ' + e.message);
-      }
-    }
-
-    for (const g of gathered) {
-      pick(g.titles, g.name, items, MAX);
-    }
+    // 三个源并发：以前串行时一个源超时 8 秒会让后面两个一起等，
+    // 最坏 24 秒才轮到兜底，看板渲染被拖住。
+    const results = await Promise.allSettled(
+      sources.map(([url]) => fetchRss(url, 20))
+    );
+    results.forEach((r, i) => {
+      if (r.status === 'fulfilled') pick(r.value, sources[i][1], items, MAX);
+      else errors.push(sources[i][1] + ': ' + (r.reason && r.reason.message));
+    });
     // 一句话新闻：短的优先。Array.sort 稳定，同长度保持源顺序
     items.sort((a, b) => a.len - b.len);
 
@@ -107,7 +129,7 @@ export function getNews(language = 'zh') {
       );
       if (r.ok && r.data && Array.isArray(r.data.hits)) {
         for (const h of r.data.hits) {
-          if (h.title) items.push({ title: h.title, source: 'HN' });
+          if (h.title) items.push({ title: cleanTitle(h.title), source: 'HN' });
           if (items.length >= 3) break;
         }
       } else {
