@@ -1,12 +1,12 @@
 # DayPane — Kindle E-Ink Dashboard with KOReader
 
-> v0.3.3: While the dashboard is visible, hold-awake mode is enabled by default. Manual sleep pauses updates until wake; recurring RTC wake is disabled by default. Wi-Fi management and automatic radio shutdown are opt-in. Only Wi-Fi started by this plugin is shut down. Replace the plugin folder as a whole; runtime.lua is obsolete.
+> v0.3.4: While the dashboard is visible, hold-awake mode is enabled by default. Manual sleep pauses updates until wake; recurring RTC wake is disabled by default. Wi-Fi management and automatic radio shutdown are opt-in. Only Wi-Fi started by this plugin is shut down. Replace the plugin folder as a whole; runtime.lua is obsolete.
 
 [简体中文](README.zh-CN.md) | **English (default)**
 
 Repurpose an old Amazon Kindle as an always-on e-ink dashboard for weather, world clocks, market data and daily information. DayPane is an open-source Kindle repurposing project with a KOReader plugin, a local Node.js server and a GitHub Actions cloud renderer. Jailbreak and KOReader installation are prerequisites; this project does not provide a jailbreak.
 
-Formerly **Shawn Kanban / Kindle Dash**. The repository is now `daypane`. GitHub redirects old repository links, but not the old Pages image URLs. Update an installed v0.3.3 plugin’s cloud image URL to the new address below, or install the latest plugin source to migrate either built-in image URL automatically. Custom image URLs are preserved. Update your quota reporter’s `GITHUB_REPO` to `shenliucn-prog/daypane`. The plugin folder remains `KindleDash.koplugin`; saved settings and Chinese/English language preferences are preserved. The current v0.3.3 release still displays the old name; the source now uses DayPane.
+Formerly **Shawn Kanban / Kindle Dash**. The repository is now `daypane`. GitHub redirects old repository links, but not the old Pages image URLs. Older installed plugins need their cloud image URL updated to the new address below, or install the latest plugin source to migrate either built-in image URL automatically. Custom image URLs are preserved. Update your quota reporter’s `GITHUB_REPO` to `shenliucn-prog/daypane`. The plugin folder remains `KindleDash.koplugin`; saved settings and Chinese/English language preferences are preserved. Releases from v0.3.4 onward use the DayPane name.
 
 A Windows/macOS Node.js service and cloud renderer for an e-ink dashboard: WorkBuddy / Claude Code / Codex activity estimates, weather, US and A-share markets, world clocks, and exchange rates. The KOReader **DayPane** plugin downloads full-screen images and refreshes at :00 and :30 while the dashboard is open.
 
@@ -14,7 +14,7 @@ English is the default repository language. The Kindle plugin supports English a
 
 Select **DayPane → Language / 语言 → English / 中文** to choose independently of your Kindle firmware language. This uses the same plugin on English and Chinese Kindles; a jailbroken device and KOReader are still required.
 
-## Install v0.3.3
+## Install v0.3.4
 
 Download the versioned plugin ZIP from [Releases](https://github.com/shenliucn-prog/daypane/releases). Follow [installation, upgrade and rollback](docs/UPGRADE.md); copy the whole plugin folder, not just main.lua.
 

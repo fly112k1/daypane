@@ -2,9 +2,9 @@
 
 把闲置 Amazon Kindle 改造成常驻墨水屏信息看板：天气、世界时钟、行情和每日资讯。DayPane 是开源的 Kindle 改造／旧设备再利用项目，由 KOReader 插件、本地 Node.js 服务和 GitHub Actions 云端生成器组成。需要先完成越狱并安装 KOReader；本项目不提供越狱工具。
 
-原名 **Shawn Kanban / Kindle Dash**。仓库已改址为 `daypane`。旧仓库链接会重定向，但旧 Pages 图源地址不会。使用 v0.3.3 的设备请手动更新下方云端图地址，或安装最新插件源码以自动迁移内置中英文图源；自定义图源不变。电脑采集器的 `GITHUB_REPO` 请改为 `shenliucn-prog/daypane`。插件目录仍为 `KindleDash.koplugin`，保留已有配置及中英文偏好。当前 v0.3.3 安装包仍显示旧名称，源码已使用 DayPane。
+原名 **Shawn Kanban / Kindle Dash**。仓库已改址为 `daypane`。旧仓库链接会重定向，但旧 Pages 图源地址不会。使用旧版插件的设备请手动更新下方云端图地址，或安装最新插件源码以自动迁移内置中英文图源；自定义图源不变。电脑采集器的 `GITHUB_REPO` 请改为 `shenliucn-prog/daypane`。插件目录仍为 `KindleDash.koplugin`，保留已有配置及中英文偏好。v0.3.4 起安装包使用 DayPane 名称。
 
-> v0.3.3：看板显示期间默认保持唤醒；手动休眠后暂停更新，唤醒后恢复。周期 RTC 唤醒默认关闭。联网管理和自动关闭 Wi-Fi 均需主动开启，且仅关闭插件自己开启的无线电。升级请整体替换插件目录，runtime.lua 已不再使用。
+> v0.3.4：看板显示期间默认保持唤醒；手动休眠后暂停更新，唤醒后恢复。周期 RTC 唤醒默认关闭。联网管理和自动关闭 Wi-Fi 均需主动开启，且仅关闭插件自己开启的无线电。升级请整体替换插件目录，runtime.lua 已不再使用。
 
 [English](README.md) | **简体中文**
 
@@ -14,7 +14,7 @@
 
 仓库默认展示英文，本文为中文说明。Kindle 插件支持中英文菜单、提示和图片；新安装按 KOReader 语言选择，已有服务器配置的用户升级后保留中文。通过 **DayPane → Language / 语言 → English / 中文** 可独立选择，不要求更改 Kindle 固件语言。Mac 局域网配置见 [Mac 安装指南](MAC_SETUP.zh-CN.md)。
 
-## 安装 v0.3.3
+## 安装 v0.3.4
 
 从 [Releases](https://github.com/shenliucn-prog/daypane/releases) 下载版本安装包，按 [升级与回退说明](docs/UPGRADE.zh-CN.md) 复制完整插件目录（main.lua 和 sha256.lua）。你的中文地址与配置保留。
 

@@ -40,7 +40,7 @@ local JSON = require("json")
 -- 会连累 OPDS 下载、同步等其它功能的超时策略（见 request() 里的 save/restore）。
 local REQUEST_TIMEOUT = 8
 
-local VERSION = "0.3.3"
+local VERSION = "0.3.4"
 local REFRESH_SEC = 30 * 60
 local MAX_IMAGE = 4 * 1024 * 1024
 local DEFAULT_HOST = ""

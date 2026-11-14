@@ -1,12 +1,12 @@
 # Installation, upgrade and rollback
 
-> v0.3.3: While the dashboard is visible, hold-awake mode is enabled by default. Manual sleep pauses updates until wake; recurring RTC wake is disabled by default. Wi-Fi management and automatic radio shutdown are opt-in. Only Wi-Fi started by this plugin is shut down. Replace the plugin folder as a whole; runtime.lua is obsolete.
+> v0.3.4: While the dashboard is visible, hold-awake mode is enabled by default. Manual sleep pauses updates until wake; recurring RTC wake is disabled by default. Wi-Fi management and automatic radio shutdown are opt-in. Only Wi-Fi started by this plugin is shut down. Replace the plugin folder as a whole; runtime.lua is obsolete.
 
 [简体中文](UPGRADE.zh-CN.md)
 
-## Install v0.3.3
+## Install v0.3.4
 
-1. Download `ShawnKanban-0.3.3.zip` and `SHA256SUMS` from Releases. Verify the checksum if desired.
+1. Download `ShawnKanban-0.3.4.zip` and `SHA256SUMS` from Releases. Verify the checksum if desired.
 2. Exit KOReader and connect the Kindle over USB. Back up `koreader/plugins/KindleDash.koplugin/` **and** `koreader/settings/kindledash.lua` on your computer.
 3. Copy the complete `KindleDash.koplugin` folder from the ZIP into `koreader/plugins`. Both main.lua and sha256.lua are required; do not copy only main.lua.
 4. Safely eject, restart KOReader, open Tools → DayPane → Setup / test image.

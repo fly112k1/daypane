@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.3.4 (2026-11-14)
+
+- Four code-review rounds, 45 optimizations, no new features: config/DB/aggregator validation, no wildcard CORS and safe response headers, render deduplication, reporter secret/branch guards, per-render CJK leak detection, cache inflight dedup with stale fallback, injectable dashboard for offline smoke tests, GET/HEAD-only API, uniform 503 errors, atomic metadata writes and flicker-free redraw on Kindle, reproducible release packaging. The long-standing Windows `os.rename` test failure is fixed; baseline is now Node 43/43, Python 16/16, eslint clean, Lua 2/2.
+- 四轮代码审查共 45 项优化，不新增功能：配置/数据库/聚合校验、去掉 CORS 通配头并补安全响应头、渲染并发去重、上报器密钥与分支防护、每次出图强制拦截英文中文漏译、缓存 inflight 去重与 stale 降级、可注入 dashboard 的离线冒烟、接口只放行 GET/HEAD、统一 503 错误、Kindle 端元数据原子写入与无闪烁重绘、可复现发布包。长期存在的 Windows `os.rename` 测试失败已修复；基线为 Node 43/43、Python 16/16、eslint 0、Lua 2/2。
+
 - Close the gaps found by the 2026-10-31 code review:
   - the browser dashboard assigned new data to a `const` binding, so every automatic refresh threw and was swallowed — the page silently stopped updating after the first load;
   - the browser dashboard still showed the retired "quota" semantics (remaining/size plus hand-written Claude Code and Codex caps) while the PNG renderer had already moved to Context / Spent / 7d activity;
